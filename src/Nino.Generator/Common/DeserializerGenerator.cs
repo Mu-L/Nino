@@ -254,7 +254,7 @@ public class DeserializerGenerator : NinoCommonGenerator
                     sb.AppendLine("#endif");
                 }
             }
-            
+
             List<string> ctorArgs = new List<string>();
             string? missingArg = null;
             foreach (var m in constructorMember)
@@ -263,7 +263,7 @@ public class DeserializerGenerator : NinoCommonGenerator
                     k.ToLower().Equals(m.ToLower()));
                 if (k != null)
                 {
-                    ctorArgs.Add(args[k]);
+                    ctorArgs.Add(k);
                 }
                 else
                 {
@@ -286,35 +286,31 @@ public class DeserializerGenerator : NinoCommonGenerator
                 return;
             }
 
+            var ctorStmt = constructor.MethodKind == MethodKind.Constructor
+                ? $"new {nt.TypeSymbol.ToDisplayString()}"
+                : $"{nt.TypeSymbol.ToDisplayString()}.{constructor.Name}";
             if (args.Keys.Any(tupleMap.ContainsKey))
             {
                 sb.AppendLine($"#if {NinoTypeHelper.WeakVersionToleranceSymbol}");
                 sb.AppendLine(
-                    $"                    {valName} = new {nt.TypeSymbol.ToDisplayString()}({string.Join(", ", ctorArgs)}){(vars.Count > 0 ? "" : ";")}");
+                    $"                    {valName} = {ctorStmt}({string.Join(", ", ctorArgs.Select(k => args[k]))}){(vars.Count > 0 ? "" : ";")}");
                 sb.AppendLine("#else");
                 sb.AppendLine(
-                    $"                    {valName} = new {nt.TypeSymbol.ToDisplayString()}({string.Join(", ",
-                        ctorArgs.Select(m =>
-                            {
-                                var tupleKey = tupleMap.Keys
-                                    .FirstOrDefault(k =>
-                                        k.ToLower()
-                                            .Equals(m.ToLower()));
-                                if (tupleKey != null)
-                                    return tupleMap[tupleKey];
+                    $"                    {valName} = {ctorStmt}({string.Join(", ", ctorArgs.Select(k =>
+                    {
+                        if (!tupleMap.TryGetValue(k, out var value))
+                        {
+                            return args[k];
+                        }
 
-                                return m;
-                            }
-                        ))}){(vars.Count > 0 ? "" : ";")}");
+                        return value;
+                    }))}){(vars.Count > 0 ? "" : ";")}");
                 sb.AppendLine("#endif");
             }
             else
             {
-                var ctorStmt = constructor.IsStatic
-                    ? $"{nt.TypeSymbol.ToDisplayString()}.{constructor.Name}"
-                    : $"new {nt.TypeSymbol.ToDisplayString()}";
                 sb.AppendLine(
-                    $"                    {valName} = {ctorStmt}({string.Join(", ", ctorArgs)}){(vars.Count > 0 ? "" : ";")}");
+                    $"                    {valName} = {ctorStmt}({string.Join(", ", ctorArgs.Select(k => args[k]))}){(vars.Count > 0 ? "" : ";")}");
             }
 
             if (vars.Count > 0)
@@ -436,7 +432,7 @@ public class DeserializerGenerator : NinoCommonGenerator
                 .Where(m => m.DeclaredAccessibility == Accessibility.Public &&
                             m.IsStatic &&
                             SymbolEqualityComparer.Default.Equals(m.ReturnType, nt.TypeSymbol)));
-            
+
             if (constructors.Count == 0)
             {
                 sb.AppendLine(
