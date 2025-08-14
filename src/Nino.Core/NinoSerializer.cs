@@ -149,15 +149,28 @@ namespace Nino.Core
 #pragma warning disable CA1000 // Do not declare static members on generic types
     public class CachedSerializer<T> : ICachedSerializer
     {
-        public readonly SerializeDelegate<T> Serializer;
+        public SerializeDelegate<T> Serializer;
         public readonly FastMap<IntPtr, SerializeDelegate<T>> SubTypeSerializers = new();
 
-        public CachedSerializer(SerializeDelegate<T> serializer)
+        private CachedSerializer()
         {
-            Serializer = serializer;
+            // Private constructor - instance can only be created by the static field
         }
 
-        public static CachedSerializer<T> Instance = new(null);
+        /// <summary>
+        /// Lazy static readonly instance - NEVER replaced, only updated
+        /// This allows generated code to safely cache this as a static readonly field
+        /// </summary>
+        public static readonly CachedSerializer<T> Instance = new();
+
+        /// <summary>
+        /// Thread-safe update of the serializer delegate
+        /// This is called during registration and allows the instance to remain static readonly
+        /// </summary>
+        internal void UpdateSerializer(SerializeDelegate<T> serializer)
+        {
+            Serializer ??= serializer;
+        }
 
         // Cache expensive type checks
         internal static readonly bool IsReferenceOrContainsReferences =
@@ -173,9 +186,13 @@ namespace Nino.Core
         // ReSharper disable once StaticMemberInGenericType
         internal static readonly bool IsSimpleType = !IsReferenceOrContainsReferences && !HasBaseType;
 
-        [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)] // Cold exception path
+        [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)]
         private static void ThrowInvalidCast(Type actualType) =>
             throw new InvalidCastException($"Cannot cast {actualType?.FullName ?? "null"} to {typeof(T).FullName}");
+
+        [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)]
+        private static void ThrowSerializerNotSet() =>
+            throw new InvalidOperationException($"Serializer for type {typeof(T).FullName} has not been registered");
 
 
         public void AddSubTypeSerializer<TSub>(SerializeDelegate<TSub> serializer)
@@ -220,13 +237,16 @@ namespace Nino.Core
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void SerializeBoxed(object value, ref Writer writer)
         {
+            if (Serializer == null)
+                ThrowSerializerNotSet();
+
             switch (value)
             {
                 case null:
-                    Serializer(default, ref writer);
+                    Serializer!(default, ref writer);
                     break;
                 case T val:
-                    Serializer(val, ref writer);
+                    Serializer!(val, ref writer);
                     break;
             }
         }
@@ -242,6 +262,9 @@ namespace Nino.Core
                 return;
             }
 
+            if (Serializer == null)
+                ThrowSerializerNotSet();
+
             // OPTIMIZED: Direct serialization with polymorphism support
             if (SubTypeSerializers.Count != 0)
             {
@@ -250,7 +273,7 @@ namespace Nino.Core
             else
             {
                 // DIRECT DELEGATE: Generated code path - no null check needed
-                Serializer(val, ref writer);
+                Serializer!(val, ref writer);
             }
         }
 

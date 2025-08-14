@@ -146,7 +146,27 @@ namespace Nino.Core
         public DeserializeDelegateRef<T> DeserializerRef;
         internal readonly FastMap<IntPtr, DeserializeDelegate<T>> SubTypeDeserializers = new();
         internal readonly FastMap<IntPtr, DeserializeDelegateRef<T>> SubTypeDeserializerRefs = new();
-        public static CachedDeserializer<T> Instance = new();
+
+        private CachedDeserializer()
+        {
+            // Private constructor - instance can only be created by the static field
+        }
+
+        /// <summary>
+        /// Lazy static readonly instance - NEVER replaced, only updated
+        /// This allows generated code to safely cache this as a static readonly field
+        /// </summary>
+        public static readonly CachedDeserializer<T> Instance = new();
+
+        /// <summary>
+        /// Thread-safe update of the deserializer delegates
+        /// This is called during registration and allows the instance to remain static readonly
+        /// </summary>
+        internal void UpdateDeserializer(DeserializeDelegate<T> deserializer, DeserializeDelegateRef<T> deserializerRef)
+        {
+            Deserializer ??= deserializer;
+            DeserializerRef ??= deserializerRef;
+        }
 
         // Cache expensive type checks
         internal static readonly bool IsReferenceOrContainsReferences =
@@ -217,6 +237,10 @@ namespace Nino.Core
         private static void ThrowInvalidCast(Type actualType) =>
             throw new InvalidCastException($"Cannot cast {actualType?.FullName ?? "null"} to {typeof(T).FullName}");
 
+        [MethodImpl(MethodImplOptions.NoInlining | MethodImplOptions.NoOptimization)]
+        private static void ThrowDeserializerNotSet() =>
+            throw new InvalidOperationException($"Deserializer for type {typeof(T).FullName} has not been registered");
+
         // ULTRA-OPTIMIZED: Single core method with all paths optimized
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Deserialize(out T value, ref Reader reader)
@@ -228,6 +252,9 @@ namespace Nino.Core
                 return;
             }
 
+            if (Deserializer == null)
+                ThrowDeserializerNotSet();
+
             // OPTIMIZED: Direct deserialization with polymorphism support
             if (SubTypeDeserializers.Count != 0)
             {
@@ -236,7 +263,7 @@ namespace Nino.Core
             else
             {
                 // DIRECT DELEGATE: Generated code path - no null check needed
-                Deserializer(out value, ref reader);
+                Deserializer!(out value, ref reader);
             }
         }
 
@@ -251,6 +278,9 @@ namespace Nino.Core
                 return;
             }
 
+            if (DeserializerRef == null)
+                ThrowDeserializerNotSet();
+
             // OPTIMIZED: Direct deserialization with polymorphism support
             if (SubTypeDeserializerRefs.Count != 0)
             {
@@ -259,7 +289,7 @@ namespace Nino.Core
             else
             {
                 // DIRECT DELEGATE: Generated code path - no null check needed
-                DeserializerRef(ref value, ref reader);
+                DeserializerRef!(ref value, ref reader);
             }
         }
 

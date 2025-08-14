@@ -23,7 +23,9 @@ namespace Nino.Core
             {
                 if (hasBaseType)
                     HasBaseTypeMap.Add(typeof(T).TypeHandle.Value, true);
-                CachedSerializer<T>.Instance = new CachedSerializer<T>(serializer);
+                // Only update the delegate field, don't replace the instance
+                // This allows generated code to cache the static readonly instance safely
+                CachedSerializer<T>.Instance.UpdateSerializer(serializer);
                 Serializers.Add(typeof(T).TypeHandle.Value, CachedSerializer<T>.Instance);
             }
         }
@@ -36,11 +38,8 @@ namespace Nino.Core
             {
                 if (hasBaseType)
                     HasBaseTypeMap.Add(typeof(T).TypeHandle.Value, true);
-                CachedDeserializer<T>.Instance = new CachedDeserializer<T>
-                {
-                    Deserializer = deserializer,
-                    DeserializerRef = deserializerRef
-                };
+                // Only update the delegate fields, don't replace the instance
+                CachedDeserializer<T>.Instance.UpdateDeserializer(deserializer, deserializerRef);
                 Deserializers.Add(typeof(T).TypeHandle.Value, CachedDeserializer<T>.Instance);
             }
         }

@@ -44,8 +44,8 @@ namespace Nino.Core
     {
         /// <summary>
         /// Thread-safe singleton instance of the concrete formatter.
-        /// Users don't need to declare this - it's automatically provided.
+        /// Static constructors are guaranteed to be thread-safe by the CLR.
         /// </summary>
-        public static readonly Lazy<TFormatter> Instance = new(() => new TFormatter());
+        public static readonly TFormatter Instance = new();
     }
 }
