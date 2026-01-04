@@ -7,7 +7,6 @@ using Nino.Generator.BuiltInType;
 using Nino.Generator.Common;
 using Nino.Generator.Metadata;
 using Nino.Generator.Pipeline;
-using Nino.Generator.Template;
 
 namespace Nino.Generator;
 
@@ -57,11 +56,11 @@ public class GlobalGenerator : IIncrementalGenerator
                 transform: static (ctx, ct) =>
                 {
                     if (ctx.TargetSymbol is not ITypeSymbol typeSymbol)
-                        return (NinoType?)null;
+                        return null;
 
                     // Only process public types
                     if (typeSymbol.DeclaredAccessibility != Accessibility.Public)
-                        return (NinoType?)null;
+                        return null;
 
                     // Skip invalid generic types
                     if (!typeSymbol.CheckGenericValidity())
@@ -125,15 +124,15 @@ public class GlobalGenerator : IIncrementalGenerator
                 transform: static (ctx, ct) =>
                 {
                     if (ctx.SemanticModel.GetDeclaredSymbol(ctx.Node, ct) is not ITypeSymbol typeSymbol)
-                        return (NinoType?)null;
+                        return null;
 
                     // Only process public types
                     if (typeSymbol.DeclaredAccessibility != Accessibility.Public)
-                        return (NinoType?)null;
+                        return null;
 
                     // Skip invalid generic types
                     if (!typeSymbol.CheckGenericValidity())
-                        return (NinoType?)null;
+                        return null;
 
                     // Check if this type inherits NinoTypeAttribute
                     if (!SymbolDataExtractor.IsNinoType(typeSymbol))

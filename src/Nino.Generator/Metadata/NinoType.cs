@@ -124,7 +124,7 @@ public readonly record struct NinoType
         if (ParentTypeIds.Length > 0)
             return true;
 
-        return TypeInfo.IsPolymorphicType();
+        return TypeInfo?.IsPolymorphicType() ?? false;
     }
 
     /// <summary>
@@ -132,12 +132,12 @@ public readonly record struct NinoType
     /// This allows Dictionary&lt;NinoType, ...&gt; to work with value-based equality.
     /// Two NinoTypes are equal if they represent the same type (same TypeId).
     /// </summary>
-    public bool Equals(NinoType other) => TypeInfo.TypeId == other.TypeInfo.TypeId;
+    public bool Equals(NinoType other) => TypeInfo?.TypeId == other.TypeInfo?.TypeId;
 
     /// <summary>
     /// Hash code based on TypeId for efficient dictionary lookups.
     /// </summary>
-    public override int GetHashCode() => TypeInfo.TypeId;
+    public override int GetHashCode() => TypeInfo?.TypeId ?? 0;
 
     /// <summary>
     /// String representation for debugging.
@@ -146,7 +146,7 @@ public readonly record struct NinoType
     {
         var lines = new List<string>
         {
-            $"Type: {TypeInfo.DisplayName}"
+            $"Type: {TypeInfo?.DisplayName ?? "null"}"
         };
 
         if (!string.IsNullOrEmpty(CustomSerializer))

@@ -129,16 +129,16 @@ public static class CircularTypeDetector
         }
 
         // Check array element type (e.g., Node[] in Node)
-        if (memberType.ArrayRank > 0 && memberType.ArrayElementType.HasValue)
+        if (memberType.ArrayRank > 0 && memberType.ArrayElementType != null)
         {
-            if (IsTypeRelated(memberType.ArrayElementType.Value, originalTypeId, allTypes, baseTypes))
+            if (IsTypeRelated(memberType.ArrayElementType, originalTypeId, allTypes, baseTypes))
                 return true;
         }
 
         // Check nullable underlying type (e.g., Node? in Node for value types)
-        if (memberType.IsNullableValueType && memberType.NullableUnderlyingType.HasValue)
+        if (memberType.IsNullableValueType && memberType.NullableUnderlyingType != null)
         {
-            if (IsTypeRelated(memberType.NullableUnderlyingType.Value, originalTypeId, allTypes, baseTypes))
+            if (IsTypeRelated(memberType.NullableUnderlyingType, originalTypeId, allTypes, baseTypes))
                 return true;
         }
 

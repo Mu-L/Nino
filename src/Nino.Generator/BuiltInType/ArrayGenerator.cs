@@ -44,14 +44,14 @@ public class ArrayGenerator(
     public override bool Filter(TypeInfoDto typeInfo)
     {
         if (typeInfo.ArrayRank == 0) return false;
-        if (!typeInfo.ArrayElementType.HasValue) return false;
-        var elementType = typeInfo.ArrayElementType.Value;
+        if (typeInfo.ArrayElementType == null) return false;
+        var elementType = typeInfo.ArrayElementType;
         return TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) != NinoTypeKind.Invalid;
     }
 
     protected override void GenerateSerializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var elementType = typeInfo.ArrayElementType!.Value;
+        var elementType = typeInfo.ArrayElementType!;
         var rank = typeInfo.ArrayRank;
         var typeName = typeInfo.DisplayName;
 
@@ -204,7 +204,7 @@ public class ArrayGenerator(
 
     protected override void GenerateDeserializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var elementType = typeInfo.ArrayElementType!.Value;
+        var elementType = typeInfo.ArrayElementType!;
         var elemType = elementType.DisplayName;
         var rank = typeInfo.ArrayRank;
         var typeName = typeInfo.DisplayName;

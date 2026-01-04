@@ -812,7 +812,7 @@ public partial class DeserializerGenerator
             var formatterType = member.CustomFormatterType;
             if (formatterType != null)
             {
-                var varName = formatterType.Value.GetCachedVariableName("formatter");
+                var varName = formatterType.GetCachedVariableName("formatter");
                 customFormatterVarsByMember[member] = varName;
                 // Note: Static field should be generated at class level, not as local variable
             }
@@ -1348,8 +1348,8 @@ public partial class DeserializerGenerator
                     var formatterType = member.CustomFormatterType;
                     if (formatterType != null)
                     {
-                        var key = $"{formatterType.Value.DisplayName}_{member.Type.DisplayName}";
-                        globalCustomFormatters[key] = (formatterType.Value, member.Type);
+                        var key = $"{formatterType.DisplayName}_{member.Type.DisplayName}";
+                        globalCustomFormatters[key] = (formatterType, member.Type);
                     }
                 }
             }

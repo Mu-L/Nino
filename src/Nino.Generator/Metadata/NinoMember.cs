@@ -57,7 +57,7 @@ public readonly record struct NinoMember
     /// <summary>
     /// Determines if this member has a custom formatter.
     /// </summary>
-    public bool HasCustomFormatter() => CustomFormatterType.HasValue;
+    public bool HasCustomFormatter() => CustomFormatterType != null;
 
     /// <summary>
     /// String representation for debugging.
