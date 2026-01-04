@@ -8,57 +8,30 @@ using Nino.Generator.Template;
 
 namespace Nino.Generator.Common;
 
-public class PartialClassGenerator(Compilation compilation, NinoGraph ninoGraph, List<NinoType> ninoTypes)
-    : NinoCommonGenerator(compilation, ninoGraph, ninoTypes)
+public class PartialClassGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
+    NinoGraph ninoGraph,
+    EquatableArray<NinoType> ninoTypes)
+    : NinoCommonGenerator(typeInfoCache, assemblyNamespace, ninoGraph, ninoTypes)
 {
-    string WriteMembers(Compilation compilation, HashSet<string> generatedTypes, NinoType type)
+    string WriteMembers(string currentAssemblyName, HashSet<string> generatedTypes, NinoType type)
     {
         //ensure type is in this compilation, not from referenced assemblies
-        if (!type.TypeSymbol.ContainingAssembly.Equals(compilation.Assembly, SymbolEqualityComparer.Default))
+        if (type.TypeInfo.ContainingAssemblyName != currentAssemblyName)
         {
             return "";
         }
 
         var sb = new StringBuilder();
         bool hasPrivateMembers = false;
-        var ts = type.TypeSymbol;
-        Dictionary<string, ITypeSymbol> memberToDeclaringType = new();
-        if (ts is INamedTypeSymbol nts)
-        {
-            ts = nts.ConstructedFrom;
-            var members = new List<ISymbol>();
-            var curType = ts;
-            while (curType != null && curType.IsNinoType())
-            {
-                members.AddRange(curType.GetMembers());
-                curType = curType.BaseType;
-            }
-
-            foreach (var member in type.Members)
-            {
-                var m = members.FirstOrDefault(m => m.Name == member.Name);
-                if (m != null)
-                {
-                    memberToDeclaringType[member.Name] = m switch
-                    {
-                        IFieldSymbol fieldSymbol => fieldSymbol.Type,
-                        IPropertySymbol propertySymbol => propertySymbol.Type,
-                        _ => member.Type
-                    };
-                }
-                else
-                {
-                    memberToDeclaringType[member.Name] = member.Type;
-                }
-            }
-        }
 
         try
         {
             foreach (var typeMember in type.Members)
             {
                 var name = typeMember.Name;
-                var declaredType = memberToDeclaringType[name];
+                var declaredType = typeMember.Type;
                 var isPrivate = typeMember.IsPrivate;
                 var isProperty = typeMember.IsProperty;
 
@@ -67,24 +40,10 @@ public class PartialClassGenerator(Compilation compilation, NinoGraph ninoGraph,
                     continue;
                 }
 
-                var declaringType = declaredType.GetDisplayString();
-                var member = ts.GetMembers().FirstOrDefault(m => m.Name == name);
-                if (member != null)
-                {
-                    if (member is IFieldSymbol fieldSymbol)
-                    {
-                        declaringType = fieldSymbol.Type.GetDisplayString();
-                    }
-                    else if (member is IPropertySymbol propertySymbol)
-                    {
-                        declaringType = propertySymbol.Type.GetDisplayString();
-                    }
-                }
-
                 hasPrivateMembers = true;
                 var accessor = $$$"""
                                           [Nino.Core.NinoPrivateProxy(nameof({{{name}}}), {{{isProperty.ToString().ToLower()}}})]
-                                          public new {{{declaringType}}} __nino__generated__{{{name}}}
+                                          public new {{{declaredType.DisplayName}}} __nino__generated__{{{name}}}
                                           {
                                               [MethodImpl(MethodImplOptions.AggressiveInlining)]
                                               get => {{{name}}};
@@ -97,7 +56,7 @@ public class PartialClassGenerator(Compilation compilation, NinoGraph ninoGraph,
         }
         catch (Exception e)
         {
-            sb.AppendLine($"/* Error: {e.Message} for type {type.TypeSymbol.GetTypeFullName()}");
+            sb.AppendLine($"/* Error: {e.Message} for type {type.TypeInfo.FullyQualifiedName}");
             //add stacktrace
             foreach (var line in (e.StackTrace ?? "").Split('\n'))
             {
@@ -113,20 +72,35 @@ public class PartialClassGenerator(Compilation compilation, NinoGraph ninoGraph,
             return "";
         }
 
-        var hasNamespace = !ts.ContainingNamespace.IsGlobalNamespace &&
-                           !string.IsNullOrEmpty(ts.ContainingNamespace.ToDisplayString());
-        var typeNamespace = ts.ContainingNamespace.ToDisplayString();
-        var modifer = ts.GetTypeModifiers();
-        //get typename, including type parameters if any
-        var typeSimpleName = ts.Name;
-        //type arguments to type parameters
-        if (ts is INamedTypeSymbol namedTypeSymbol)
+        var typeInfo = type.TypeInfo;
+        var hasNamespace = !string.IsNullOrEmpty(typeInfo.ContainingNamespace) && typeInfo.ContainingNamespace != "<global namespace>";
+        var typeNamespace = typeInfo.ContainingNamespace;
+
+        // Build type modifier string (public/internal partial class/struct)
+        var accessibility = typeInfo.Accessibility switch
         {
-            var typeParameters = namedTypeSymbol.TypeParameters;
-            if (typeParameters.Length > 0)
-            {
-                typeSimpleName += $"<{string.Join(",", typeParameters.Select(t => t.GetDisplayString()))}>";
-            }
+            AccessibilityDto.Public => "public",
+            AccessibilityDto.Internal => "internal",
+            AccessibilityDto.ProtectedOrInternal => "protected internal",
+            _ => "internal"
+        };
+
+        var typeKind = typeInfo.Kind switch
+        {
+            TypeKindDto.Struct => "struct",
+            TypeKindDto.Class => "class",
+            _ => "class"
+        };
+
+        var modifier = $"{accessibility} partial {typeKind}";
+
+        // Get type name with generic parameters
+        var typeSimpleName = typeInfo.DisplayName;
+        // Extract simple name from fully qualified (take last part)
+        var lastDot = typeSimpleName.LastIndexOf('.');
+        if (lastDot >= 0)
+        {
+            typeSimpleName = typeSimpleName.Substring(lastDot + 1);
         }
 
         if (!generatedTypes.Add(typeSimpleName))
@@ -147,7 +121,7 @@ public class PartialClassGenerator(Compilation compilation, NinoGraph ninoGraph,
                      {{namespaceStr}}
                      #if !NET8_0_OR_GREATER
                          [Nino.Core.NinoExplicitOrder({{order}})]
-                         public partial {{modifer}} {{typeSimpleName}}
+                         {{modifier}} {{typeSimpleName}}
                          {
                      {{sb}}    }
                      #endif
@@ -162,17 +136,18 @@ public class PartialClassGenerator(Compilation compilation, NinoGraph ninoGraph,
 
     protected override void Generate(SourceProductionContext spc)
     {
-        var compilation = Compilation;
-
         HashSet<string> generatedTypes = new();
         List<string> generatedCode = new();
 
+        // Extract current assembly name from the first type (they should all be from same assembly)
+        var currentAssemblyName = NinoTypes.Length > 0 ? NinoTypes[0].TypeInfo.ContainingAssemblyName : "";
+
         foreach (var ninoType in NinoTypes)
         {
-            bool isPolymorphicType = ninoType.IsPolymorphic();
+            bool isPolymorphicType = ninoType.IsPolymorphic;
 
             // check if struct is unmanaged
-            if (ninoType.TypeSymbol.IsUnmanagedType && !isPolymorphicType)
+            if (ninoType.TypeInfo.IsUnmanagedType && !isPolymorphicType)
             {
                 continue;
             }
@@ -180,7 +155,8 @@ public class PartialClassGenerator(Compilation compilation, NinoGraph ninoGraph,
             if (NinoGraph.SubTypes.TryGetValue(ninoType, out var lst))
             {
                 //sort lst by how deep the inheritance is (i.e. how many levels of inheritance), the deepest first
-                lst.Sort((a, b) =>
+                var sortedList = new List<NinoType>(lst);
+                sortedList.Sort((a, b) =>
                 {
                     // Use TryGetValue to avoid KeyNotFoundException during concurrent execution
                     int aCount = NinoGraph.BaseTypes.TryGetValue(a, out var aBaseTypes) ? aBaseTypes.Count : 0;
@@ -188,28 +164,28 @@ public class PartialClassGenerator(Compilation compilation, NinoGraph ninoGraph,
                     return bCount.CompareTo(aCount);
                 });
 
-                foreach (var subType in lst)
+                foreach (var subType in sortedList)
                 {
-                    if (subType.TypeSymbol.IsInstanceType())
+                    if (TypeInfoDtoExtensions.IsInstanceType(subType.TypeInfo))
                     {
-                        if (subType.TypeSymbol.IsUnmanagedType)
+                        if (subType.TypeInfo.IsUnmanagedType)
                         {
                             continue;
                         }
 
-                        generatedCode.Add(WriteMembers(compilation, generatedTypes, subType));
+                        generatedCode.Add(WriteMembers(currentAssemblyName, generatedTypes, subType));
                     }
                 }
             }
 
-            if (ninoType.TypeSymbol.IsInstanceType())
+            if (TypeInfoDtoExtensions.IsInstanceType(ninoType.TypeInfo))
             {
-                if (ninoType.TypeSymbol.IsUnmanagedType)
+                if (ninoType.TypeInfo.IsUnmanagedType)
                 {
                     continue;
                 }
 
-                generatedCode.Add(WriteMembers(compilation, generatedTypes, ninoType));
+                generatedCode.Add(WriteMembers(currentAssemblyName, generatedTypes, ninoType));
             }
         }
 
@@ -222,6 +198,6 @@ public class PartialClassGenerator(Compilation compilation, NinoGraph ninoGraph,
 
                      {{string.Join("\n", generatedCode.Where(c => !string.IsNullOrEmpty(c)))}}
                      """;
-        spc.AddSource($"{Compilation.AssemblyName!.GetNamespace()}.PartialClass.g.cs", code);
+        spc.AddSource($"{AssemblyNamespace}.PartialClass.g.cs", code);
     }
 }

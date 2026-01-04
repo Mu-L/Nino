@@ -32,45 +32,44 @@ using Nino.Generator.Template;
 namespace Nino.Generator.BuiltInType;
 
 public class KeyValuePairGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    HashSet<ITypeSymbol> potentialTypes,
-    HashSet<ITypeSymbol> selectedTypes,
-    Compilation compilation) : NinoBuiltInTypeGenerator(ninoGraph, potentialTypes, selectedTypes, compilation)
+    HashSet<int> potentialTypeIds,
+    HashSet<int> selectedTypeIds,
+    bool isUnityAssembly = false) : NinoBuiltInTypeGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly)
 {
     protected override string OutputFileName => "NinoKeyValuePairGenerator";
 
-    public override bool Filter(ITypeSymbol typeSymbol)
+    public override bool Filter(TypeInfoDto typeInfo)
     {
-        if (typeSymbol is not INamedTypeSymbol namedType) return false;
-        if (!namedType.IsGenericType) return false;
-        if (namedType.TypeArguments.Length != 2) return false;
+        if (!typeInfo.IsGenericType) return false;
+        if (typeInfo.TypeArguments.Length != 2) return false;
 
-        var keyType = namedType.TypeArguments[0];
-        var valueType = namedType.TypeArguments[1];
+        var keyType = typeInfo.TypeArguments[0];
+        var valueType = typeInfo.TypeArguments[1];
 
-        if (keyType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid ||
-            valueType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid)
+        if (TypeInfoDtoExtensions.GetKind(keyType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid ||
+            TypeInfoDtoExtensions.GetKind(valueType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid)
             return false;
 
-        return typeSymbol.Name == "KeyValuePair";
+        return typeInfo.Name == "KeyValuePair";
     }
 
-    protected override void GenerateSerializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateSerializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var types = namedType.TypeArguments.ToArray();
-        var keyType = types[0];
-        var valueType = types[1];
+        var keyType = typeInfo.TypeArguments[0];
+        var valueType = typeInfo.TypeArguments[1];
 
         // Check if we can use the fast unmanaged write
         // The KVP itself must be unmanaged (both key and value must be unmanaged)
-        bool canUseFastPath = typeSymbol.IsUnmanagedType &&
-                              keyType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged &&
-                              valueType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool canUseFastPath = typeInfo.IsUnmanagedType &&
+                              TypeInfoDtoExtensions.GetKind(keyType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged &&
+                              TypeInfoDtoExtensions.GetKind(valueType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         WriteAggressiveInlining(writer);
         writer.Append("public static void Serialize(this ");
-        writer.Append(typeSymbol.GetDisplayString());
+        writer.Append(typeInfo.DisplayName);
         writer.AppendLine(" value, ref Writer writer)");
         writer.AppendLine("{");
 
@@ -89,25 +88,23 @@ public class KeyValuePairGenerator(
         writer.AppendLine("}");
     }
 
-    protected override void GenerateDeserializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateDeserializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var types = namedType.TypeArguments.ToArray();
-        var keyType = types[0];
-        var valueType = types[1];
+        var keyType = typeInfo.TypeArguments[0];
+        var valueType = typeInfo.TypeArguments[1];
 
         // Check if we can use the fast unmanaged read
         // The KVP itself must be unmanaged (both key and value must be unmanaged)
-        bool canUseFastPath = typeSymbol.IsUnmanagedType &&
-                              typeSymbol.OriginalDefinition.SpecialType != SpecialType.System_Nullable_T &&
-                              keyType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged &&
-                              valueType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
-        var typeName = typeSymbol.ToDisplayString();
+        bool canUseFastPath = typeInfo.IsUnmanagedType &&
+                              typeInfo.SpecialType != SpecialTypeDto.System_Nullable_T &&
+                              TypeInfoDtoExtensions.GetKind(keyType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged &&
+                              TypeInfoDtoExtensions.GetKind(valueType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
+        var typeName = typeInfo.DisplayName;
 
         // Out overload
         WriteAggressiveInlining(writer);
         writer.Append("public static void Deserialize(out ");
-        writer.Append(typeName);
+        writer.Append(typeInfo.DisplayName);
         writer.AppendLine(" value, ref Reader reader)");
         writer.AppendLine("{");
         EofCheck(writer);
@@ -133,7 +130,7 @@ public class KeyValuePairGenerator(
         // Ref overload - KeyValuePair is not modifiable
         WriteAggressiveInlining(writer);
         writer.Append("public static void DeserializeRef(ref ");
-        writer.Append(typeName);
+        writer.Append(typeInfo.DisplayName);
         writer.AppendLine(" value, ref Reader reader)");
 
         if (canUseFastPath)

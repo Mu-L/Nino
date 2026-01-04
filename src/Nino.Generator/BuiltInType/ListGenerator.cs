@@ -31,50 +31,52 @@ using Nino.Generator.Template;
 namespace Nino.Generator.BuiltInType;
 
 public class ListGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    HashSet<ITypeSymbol> potentialTypes,
-    HashSet<ITypeSymbol> selectedTypes,
-    Compilation compilation) : NinoBuiltInTypeGenerator(ninoGraph, potentialTypes, selectedTypes, compilation)
+    HashSet<int> potentialTypeIds,
+    HashSet<int> selectedTypeIds,
+    bool isUnityAssembly = false) : NinoBuiltInTypeGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly)
 {
     protected override string OutputFileName => "NinoListTypeGenerator";
 
-    public override bool Filter(ITypeSymbol typeSymbol)
+    public override bool Filter(TypeInfoDto typeInfo)
     {
-        if (typeSymbol is not INamedTypeSymbol namedType) return false;
+        if (!typeInfo.IsGenericType) return false;
+        if (typeInfo.TypeArguments.Length != 1) return false;
 
         // Accept List<T>, IList<T>, ICollection<T>, and IEnumerable<T>
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         if (originalDef != "System.Collections.Generic.List<T>" &&
             originalDef != "System.Collections.Generic.IList<T>" &&
             originalDef != "System.Collections.Generic.ICollection<T>" &&
             originalDef != "System.Collections.Generic.IEnumerable<T>")
             return false;
 
-        var elementType = namedType.TypeArguments[0];
+        var elementType = typeInfo.TypeArguments[0];
 
         // Element type must be valid
-        if (elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid)
+        if (TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid)
             return false;
 
         return true;
     }
 
-    protected override void GenerateSerializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateSerializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var elementType = namedType.TypeArguments[0];
+        var elementType = typeInfo.TypeArguments[0];
 
         // Check if this is an interface type
-        bool isInterface = typeSymbol.TypeKind == TypeKind.Interface;
+        bool isInterface = typeInfo.Kind == TypeKindDto.Interface;
 
         // Check if this is IEnumerable (which doesn't have Count property)
-        bool isIEnumerable = namedType.OriginalDefinition.ToDisplayString() == "System.Collections.Generic.IEnumerable<T>";
+        bool isIEnumerable = typeInfo.GenericOriginalDefinition == "System.Collections.Generic.IEnumerable<T>";
 
-        var typeName = typeSymbol.GetDisplayString();
+        var typeName = typeInfo.DisplayName;
 
         // Check if we can use the fast unmanaged write path (only for concrete List<T> with unmanaged elements)
         bool canUseFastPath = !isInterface &&
-                              elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+                              TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         WriteAggressiveInlining(writer);
         writer.Append("public static void Serialize(this ");
@@ -104,12 +106,12 @@ public class ListGenerator(
                 writer.AppendLine("    foreach (var item in value)");
                 writer.AppendLine("    {");
                 writer.AppendLine("        cnt++;");
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        var pos = writer.Advance(4);"); });
 
                 writer.Append("        ");
                 writer.AppendLine(GetSerializeString(elementType, "item"));
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        writer.PutLength(pos);"); });
                 writer.AppendLine("    }");
                 writer.AppendLine();
@@ -123,12 +125,12 @@ public class ListGenerator(
                 writer.AppendLine();
                 writer.AppendLine("    foreach (var item in value)");
                 writer.AppendLine("    {");
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        var pos = writer.Advance(4);"); });
 
                 writer.Append("        ");
                 writer.AppendLine(GetSerializeString(elementType, "item"));
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        writer.PutLength(pos);"); });
                 writer.AppendLine("    }");
             }
@@ -137,23 +139,22 @@ public class ListGenerator(
         writer.AppendLine("}");
     }
 
-    protected override void GenerateDeserializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateDeserializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var elementType = namedType.TypeArguments[0];
+        var elementType = typeInfo.TypeArguments[0];
 
         // Check if this is an interface type
-        bool isInterface = typeSymbol.TypeKind == TypeKind.Interface;
+        bool isInterface = typeInfo.Kind == TypeKindDto.Interface;
 
         // For interfaces, use List<T> as the concrete type
-        var typeName = typeSymbol.GetDisplayString();
+        var typeName = typeInfo.DisplayName;
         var concreteTypeName = isInterface
-            ? $"System.Collections.Generic.List<{elementType.GetDisplayString()}>"
+            ? $"System.Collections.Generic.List<{elementType.DisplayName}>"
             : typeName;
 
         // Check if we can use the fast unmanaged read path (only for concrete List<T> with unmanaged elements)
         bool canUseFastPath = !isInterface &&
-                              elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+                              TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         // Out overload
         WriteAggressiveInlining(writer);
@@ -177,7 +178,7 @@ public class ListGenerator(
             writer.AppendLine("    }");
             writer.AppendLine();
 
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("    Reader eleReader;"); });
             writer.AppendLine();
 
@@ -190,7 +191,7 @@ public class ListGenerator(
                 writer.AppendLine("    for (int i = 0; i < length; i++)");
                 writer.AppendLine("    {");
 
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
@@ -215,7 +216,7 @@ public class ListGenerator(
                 writer.AppendLine("    for (int i = 0; i < length; i++)");
                 writer.AppendLine("    {");
 
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
@@ -266,7 +267,7 @@ public class ListGenerator(
                 writer.AppendLine("    }");
                 writer.AppendLine();
 
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("    Reader eleReader;"); });
                 writer.AppendLine();
 
@@ -279,7 +280,7 @@ public class ListGenerator(
                 writer.AppendLine("        for (int i = 0; i < length; i++)");
                 writer.AppendLine("        {");
 
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("            eleReader = reader.Slice();");
@@ -303,7 +304,7 @@ public class ListGenerator(
                 writer.AppendLine("        int reuseCount = System.Math.Min(existingCount, length);");
 
                 // Check if element type is a mutable reference type (not string or value type)
-                bool isMutableReferenceType = !elementType.IsValueType && elementType.SpecialType != SpecialType.System_String;
+                bool isMutableReferenceType = !elementType.IsValueType && elementType.SpecialType != SpecialTypeDto.System_String;
 
                 if (isMutableReferenceType)
                 {
@@ -312,7 +313,7 @@ public class ListGenerator(
                     writer.AppendLine("        {");
                     writer.AppendLine("            var temp = value[i];");
 
-                    IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                    IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                         w =>
                         {
                             w.AppendLine("            eleReader = reader.Slice();");
@@ -333,7 +334,7 @@ public class ListGenerator(
                     writer.AppendLine("        {");
                     writer.AppendLine("            var temp = value[i];");
 
-                    IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                    IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                         w =>
                         {
                             w.AppendLine("            eleReader = reader.Slice();");
@@ -360,7 +361,7 @@ public class ListGenerator(
                 writer.AppendLine("            for (int i = existingCount; i < length; i++)");
                 writer.AppendLine("            {");
 
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("                eleReader = reader.Slice();");

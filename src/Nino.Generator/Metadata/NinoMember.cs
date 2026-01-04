@@ -1,48 +1,76 @@
-using Microsoft.CodeAnalysis;
-using System.Linq;
-
 namespace Nino.Generator.Metadata;
 
-public class NinoMember(string name, ITypeSymbol type, ISymbol memberSymbol)
+/// <summary>
+/// Immutable DTO representing a serializable member (field or property) of a NinoType.
+/// Converted from mutable class to readonly record struct for value-based equality and incremental caching.
+/// </summary>
+public readonly record struct NinoMember
 {
-    public string Name { get; set; } = name;
-    public ITypeSymbol Type { get; set; } = type.GetNormalizedTypeSymbol().GetPureType();
-    public ISymbol MemberSymbol { get; set; } = memberSymbol;
-    public bool IsCtorParameter { get; set; }
-    public bool IsPrivate { get; set; }
-    public bool IsProperty { get; set; }
-    public bool IsUtf8String { get; set; }
+    /// <summary>
+    /// Member name (field or property name).
+    /// </summary>
+    public string Name { get; init; }
 
-    // Track if we've already reported NINO011 warning for this member to avoid duplicates
-    internal bool HasReportedUnrecognizableTypeWarning { get; set; }
+    /// <summary>
+    /// Type information for this member.
+    /// Replaces the old ITypeSymbol Type property.
+    /// </summary>
+    public TypeInfoDto Type { get; init; }
 
-    public bool HasCustomFormatter()
-    {
-        return MemberSymbol.GetAttributes()
-            .Any(attr => attr.AttributeClass?.Name == "NinoCustomFormatterAttribute");
-    }
+    /// <summary>
+    /// True if this member is a constructor parameter.
+    /// </summary>
+    public bool IsCtorParameter { get; init; }
 
-    public ITypeSymbol? CustomFormatterType()
-    {
-        var customFormatterAttr = MemberSymbol.GetAttributes()
-            .FirstOrDefault(attr => attr.AttributeClass?.Name == "NinoCustomFormatterAttribute");
-        
-        if (customFormatterAttr?.ConstructorArguments.Length > 0)
-        {
-            var arg = customFormatterAttr.ConstructorArguments[0];
-            if (arg.Value is ITypeSymbol typeSymbol)
-                return typeSymbol;
-        }
-        return null;
-    }
+    /// <summary>
+    /// True if this member is private.
+    /// </summary>
+    public bool IsPrivate { get; init; }
 
+    /// <summary>
+    /// True if this member is a property (false for fields).
+    /// </summary>
+    public bool IsProperty { get; init; }
+
+    /// <summary>
+    /// True if this member is a UTF-8 string (special serialization).
+    /// </summary>
+    public bool IsUtf8String { get; init; }
+
+    /// <summary>
+    /// True if this member is static.
+    /// </summary>
+    public bool IsStatic { get; init; }
+
+    /// <summary>
+    /// True if this member is readonly.
+    /// </summary>
+    public bool IsReadOnly { get; init; }
+
+    /// <summary>
+    /// Custom formatter type for this member (null if no custom formatter).
+    /// Replaces the old CustomFormatterType() method.
+    /// This data is extracted during the pipeline phase.
+    /// </summary>
+    public TypeInfoDto? CustomFormatterType { get; init; }
+
+    /// <summary>
+    /// Determines if this member has a custom formatter.
+    /// </summary>
+    public bool HasCustomFormatter() => CustomFormatterType.HasValue;
+
+    /// <summary>
+    /// String representation for debugging.
+    /// </summary>
     public override string ToString()
     {
         return
-            $"{Type.GetDisplayString()} {Name} " +
+            $"{Type.DisplayName} {Name} " +
             $"[Ctor: {IsCtorParameter}, " +
             $"Private: {IsPrivate}, " +
             $"Property: {IsProperty}, " +
-            $"Utf8String: {IsUtf8String}]";
+            $"Utf8String: {IsUtf8String}, " +
+            $"Static: {IsStatic}, " +
+            $"ReadOnly: {IsReadOnly}]";
     }
 }

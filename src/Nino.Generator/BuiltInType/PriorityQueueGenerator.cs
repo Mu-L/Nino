@@ -31,44 +31,46 @@ using Nino.Generator.Template;
 namespace Nino.Generator.BuiltInType;
 
 public class PriorityQueueGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    HashSet<ITypeSymbol> potentialTypes,
-    HashSet<ITypeSymbol> selectedTypes,
-    Compilation compilation) : NinoBuiltInTypeGenerator(ninoGraph, potentialTypes, selectedTypes, compilation)
+    HashSet<int> potentialTypeIds,
+    HashSet<int> selectedTypeIds,
+    bool isUnityAssembly = false) : NinoBuiltInTypeGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly)
 {
     protected override string OutputFileName => "NinoPriorityQueueTypeGenerator";
 
-    public override bool Filter(ITypeSymbol typeSymbol)
+    public override bool Filter(TypeInfoDto typeInfo)
     {
-        if (typeSymbol is not INamedTypeSymbol namedType) return false;
+        if (!typeInfo.IsGenericType) return false;
+        if (typeInfo.TypeArguments.Length != 2) return false;
 
         // Accept PriorityQueue<TElement, TPriority>
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         if (originalDef != "System.Collections.Generic.PriorityQueue<TElement, TPriority>")
             return false;
 
-        var elementType = namedType.TypeArguments[0];
-        var priorityType = namedType.TypeArguments[1];
+        var elementType = typeInfo.TypeArguments[0];
+        var priorityType = typeInfo.TypeArguments[1];
 
         // Both element and priority types must be valid
-        if (elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid ||
-            priorityType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid)
+        if (TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid ||
+            TypeInfoDtoExtensions.GetKind(priorityType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid)
             return false;
 
         return true;
     }
 
-    protected override void GenerateSerializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateSerializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var elementType = namedType.TypeArguments[0];
-        var priorityType = namedType.TypeArguments[1];
+        var elementType = typeInfo.TypeArguments[0];
+        var priorityType = typeInfo.TypeArguments[1];
 
-        var typeName = typeSymbol.GetDisplayString();
+        var typeName = typeInfo.DisplayName;
 
         // Check if both element and priority are unmanaged (no WeakVersionTolerance needed)
-        bool isUnmanaged = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged &&
-                          priorityType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool isUnmanaged = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged &&
+                          TypeInfoDtoExtensions.GetKind(priorityType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         WriteAggressiveInlining(writer);
         writer.Append("public static void Serialize(this ");
@@ -93,7 +95,7 @@ public class PriorityQueueGenerator(
 
         if (!isUnmanaged)
         {
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("        var pos = writer.Advance(4);"); });
         }
 
@@ -104,7 +106,7 @@ public class PriorityQueueGenerator(
 
         if (!isUnmanaged)
         {
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("        writer.PutLength(pos);"); });
         }
 
@@ -113,17 +115,16 @@ public class PriorityQueueGenerator(
         writer.AppendLine("}");
     }
 
-    protected override void GenerateDeserializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateDeserializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var elementType = namedType.TypeArguments[0];
-        var priorityType = namedType.TypeArguments[1];
+        var elementType = typeInfo.TypeArguments[0];
+        var priorityType = typeInfo.TypeArguments[1];
 
-        var typeName = typeSymbol.GetDisplayString();
+        var typeName = typeInfo.DisplayName;
 
         // Check if both element and priority are unmanaged (no WeakVersionTolerance needed)
-        bool isUnmanaged = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged &&
-                          priorityType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool isUnmanaged = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged &&
+                          TypeInfoDtoExtensions.GetKind(priorityType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         // Out overload
         WriteAggressiveInlining(writer);
@@ -143,7 +144,7 @@ public class PriorityQueueGenerator(
 
         if (!isUnmanaged)
         {
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("    Reader eleReader;"); });
             writer.AppendLine();
         }
@@ -163,7 +164,7 @@ public class PriorityQueueGenerator(
         }
         else
         {
-            IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w =>
                 {
                     w.AppendLine("        eleReader = reader.Slice();");
@@ -206,7 +207,7 @@ public class PriorityQueueGenerator(
 
         if (!isUnmanaged)
         {
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("    Reader eleReader;"); });
             writer.AppendLine();
         }
@@ -235,7 +236,7 @@ public class PriorityQueueGenerator(
         }
         else
         {
-            IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w =>
                 {
                     w.AppendLine("        eleReader = reader.Slice();");

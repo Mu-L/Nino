@@ -47,7 +47,7 @@ public static class NinoTypeHelper
         if (type.IsUnmanagedType &&
             type.OriginalDefinition.SpecialType != SpecialType.System_Nullable_T &&
             (!ninoGraph.TypeMap.TryGetValue(type.GetDisplayString(), out var nt) ||
-             !nt.IsPolymorphic()))
+             !nt.IsPolymorphic))
         {
             return NinoTypeKind.Unmanaged;
         }

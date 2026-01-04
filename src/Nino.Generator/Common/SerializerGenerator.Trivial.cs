@@ -9,9 +9,8 @@ namespace Nino.Generator.Common;
 
 public partial class SerializerGenerator
 {
-    private void GenerateTrivialCode(SourceProductionContext spc, HashSet<ITypeSymbol> generatedTypes)
+    private void GenerateTrivialCode(SourceProductionContext spc, HashSet<int> generatedTypeIds)
     {
-        var compilation = Compilation;
         var sb = new StringBuilder();
         sb.GenerateClassSerializeMethods("string");
         HashSet<string> generatedTypeNames = new();
@@ -20,22 +19,22 @@ public partial class SerializerGenerator
         {
             try
             {
-                if (!generatedTypes.Add(ninoType.TypeSymbol))
+                if (!generatedTypeIds.Add(ninoType.TypeInfo.TypeId))
                     continue;
-                if (!generatedTypeNames.Add(ninoType.TypeSymbol.GetDisplayString()))
+                if (!generatedTypeNames.Add(ninoType.TypeInfo.DisplayName))
                     continue;
 
-                if (!ninoType.TypeSymbol.IsInstanceType() ||
+                if (!TypeInfoDtoExtensions.IsInstanceType(ninoType.TypeInfo) ||
                     !string.IsNullOrEmpty(ninoType.CustomSerializer))
                     continue;
                 sb.AppendLine();
                 sb.AppendLine($$"""
                                         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-                                        public static void SerializeImpl({{ninoType.TypeSymbol.GetTypeFullName()}} value, ref Writer writer)
+                                        public static void SerializeImpl({{ninoType.TypeInfo.FullyQualifiedName}} value, ref Writer writer)
                                         {
                                 """);
 
-                if (!ninoType.TypeSymbol.IsValueType)
+                if (!ninoType.TypeInfo.IsValueType)
                 {
                     sb.AppendLine("            if(value == null)");
                     sb.AppendLine("            {");
@@ -46,14 +45,14 @@ public partial class SerializerGenerator
                 }
 
                 // Optimize polymorphic type writing - inline constant when possible
-                if (ninoType.IsPolymorphic())
+                if (ninoType.IsPolymorphic)
                 {
                     sb.AppendLine(
-                        $"            writer.Write(NinoTypeConst.{ninoType.TypeSymbol.GetTypeFullName().GetTypeConstName()});");
+                        $"            writer.Write(NinoTypeConst.{ninoType.TypeInfo.FullyQualifiedName.GetTypeConstName()});");
                 }
 
                 // Optimized write path - direct write for unmanaged types
-                if (ninoType.TypeSymbol.IsUnmanagedType)
+                if (ninoType.TypeInfo.IsUnmanagedType)
                 {
                     sb.AppendLine("            writer.Write(value);");
                 }
@@ -67,7 +66,7 @@ public partial class SerializerGenerator
             }
             catch (Exception e)
             {
-                sb.AppendLine($"/* Error: {e.Message} for type {ninoType.TypeSymbol.GetTypeFullName()}");
+                sb.AppendLine($"/* Error: {e.Message} for type {ninoType.TypeInfo.FullyQualifiedName}");
                 //add stacktrace
                 foreach (var line in (e.StackTrace ?? "").Split('\n'))
                 {
@@ -79,7 +78,7 @@ public partial class SerializerGenerator
             }
         }
 
-        var curNamespace = compilation.AssemblyName!.GetNamespace();
+        var curNamespace = AssemblyNamespace;
 
         // Collect all custom formatters for static field generation
         var globalCustomFormatters = CollectGlobalCustomFormatters();
@@ -147,9 +146,9 @@ public partial class SerializerGenerator
         return $"{indent}{ret}";
     }
 
-    private Dictionary<string, (ITypeSymbol FormatterType, ITypeSymbol ValueType)> CollectGlobalCustomFormatters()
+    private Dictionary<string, (TypeInfoDto FormatterType, TypeInfoDto ValueType)> CollectGlobalCustomFormatters()
     {
-        var globalCustomFormatters = new Dictionary<string, (ITypeSymbol FormatterType, ITypeSymbol ValueType)>();
+        var globalCustomFormatters = new Dictionary<string, (TypeInfoDto FormatterType, TypeInfoDto ValueType)>();
 
         foreach (var ninoType in NinoTypes)
         {
@@ -157,11 +156,11 @@ public partial class SerializerGenerator
             {
                 if (member.HasCustomFormatter())
                 {
-                    var formatterType = member.CustomFormatterType();
+                    var formatterType = member.CustomFormatterType;
                     if (formatterType != null)
                     {
-                        var key = $"{formatterType.GetDisplayString()}_{member.Type.GetDisplayString()}";
-                        globalCustomFormatters[key] = (formatterType, member.Type);
+                        var key = $"{formatterType.Value.DisplayName}_{member.Type.DisplayName}";
+                        globalCustomFormatters[key] = (formatterType.Value, member.Type);
                     }
                 }
             }
@@ -171,7 +170,7 @@ public partial class SerializerGenerator
     }
 
     private string GenerateStaticFormatterFields(
-        Dictionary<string, (ITypeSymbol FormatterType, ITypeSymbol ValueType)> globalCustomFormatters)
+        Dictionary<string, (TypeInfoDto FormatterType, TypeInfoDto ValueType)> globalCustomFormatters)
     {
         if (globalCustomFormatters.Count == 0)
             return "";
@@ -186,22 +185,22 @@ public partial class SerializerGenerator
             var valueType = kvp.Value.ValueType;
             var varName = formatterType.GetCachedVariableName("formatter");
             sb.AppendLine(
-                $"        private static readonly {formatterType.GetDisplayString()} {varName} = NinoFormatterInstance<{formatterType.GetDisplayString()}, {valueType.GetDisplayString()}>.Instance;");
+                $"        private static readonly {formatterType.DisplayName} {varName} = NinoFormatterInstance<{formatterType.DisplayName}, {valueType.DisplayName}>.Instance;");
         }
 
         return sb.ToString();
     }
 
-    private bool TryGetInlineSerializeCall(ITypeSymbol type, string valueExpression, out string invocation)
+    private bool TryGetInlineSerializeCall(TypeInfoDto type, string valueExpression, out string invocation)
     {
         invocation = null!;
-        if (!NinoGraph.TypeMap.TryGetValue(type.GetDisplayString(), out var ninoType))
+        if (!NinoGraph.TypeMap.TryGetValue(type.DisplayName, out var ninoType))
             return false;
 
         if (!string.IsNullOrEmpty(ninoType.CustomSerializer))
             return false;
 
-        if (!ninoType.TypeSymbol.IsSealedOrStruct())
+        if (!TypeInfoDtoExtensions.IsSealedOrStruct(ninoType.TypeInfo))
             return false;
 
         invocation = $"Serializer.SerializeImpl({valueExpression}, ref writer)";
@@ -212,7 +211,7 @@ public partial class SerializerGenerator
         string indent = "")
     {
         // First pass: collect all types that need serializers or custom formatters
-        HashSet<ITypeSymbol> typesNeedingSerializers = new(SymbolEqualityComparer.Default);
+        HashSet<int> typesNeedingSerializers = new();
         HashSet<NinoMember> membersWithCustomFormatters = new();
 
         foreach (var members in type.GroupByPrimitivity())
@@ -221,7 +220,7 @@ public partial class SerializerGenerator
             if (members.Count == 1)
             {
                 var member = members[0];
-                if (!(member.Type.SpecialType == SpecialType.System_String && member.IsUtf8String))
+                if (!(member.Type.SpecialType == SpecialTypeDto.System_String && member.IsUtf8String))
                 {
                     if (member.HasCustomFormatter())
                     {
@@ -229,12 +228,12 @@ public partial class SerializerGenerator
                     }
                     else
                     {
-                        var kind = member.Type.GetKind(NinoGraph, GeneratedBuiltInTypes);
-                        if (kind != NinoTypeHelper.NinoTypeKind.Unmanaged &&
-                            kind != NinoTypeHelper.NinoTypeKind.Boxed &&
-                            member.Type.SpecialType != SpecialType.System_String)
+                        var kind = member.Type.GetKind(NinoGraph, GeneratedBuiltInTypeIds);
+                        if (kind != NinoTypeKind.Unmanaged &&
+                            kind != NinoTypeKind.Boxed &&
+                            member.Type.SpecialType != SpecialTypeDto.System_String)
                         {
-                            typesNeedingSerializers.Add(member.Type);
+                            typesNeedingSerializers.Add(member.Type.TypeId);
                         }
                     }
                 }
@@ -243,11 +242,12 @@ public partial class SerializerGenerator
 
         // No need to generate serializer variable declarations since CachedSerializer is static
         Dictionary<string, string> serializerVarsByType = new();
-        foreach (var serializerType in typesNeedingSerializers)
+        foreach (var typeId in typesNeedingSerializers)
         {
-            var typeDisplayName = serializerType.GetDisplayString();
+            if (!TypeInfoCache.TryGetValue(typeId, out var serializerType)) continue;
+            var typeDisplayName = serializerType.DisplayName;
             // ReSharper disable once PossibleUnintendedLinearSearchInSet
-            bool isBuiltIn = GeneratedBuiltInTypes.Contains(serializerType, TupleSanitizedEqualityComparer.Default);
+            bool isBuiltIn = GeneratedBuiltInTypeIds.Contains(typeId);
 
             if (!isBuiltIn)
             {
@@ -260,19 +260,19 @@ public partial class SerializerGenerator
         Dictionary<NinoMember, string> customFormatterVarsByMember = new();
         foreach (var member in membersWithCustomFormatters)
         {
-            var formatterType = member.CustomFormatterType();
+            var formatterType = member.CustomFormatterType;
             if (formatterType != null)
             {
-                var varName = formatterType.GetCachedVariableName("formatter");
+                var varName = formatterType.Value.GetCachedVariableName("formatter");
                 customFormatterVarsByMember[member] = varName;
                 // Note: Static field should be generated at class level, not as local variable
             }
         }
 
         // Helper to get serializer variable name for a type
-        string GetSerializerVarName(ITypeSymbol serializerType)
+        string GetSerializerVarName(TypeInfoDto serializerType)
         {
-            return serializerVarsByType[serializerType.GetDisplayString()];
+            return serializerVarsByType[serializerType.DisplayName];
         }
 
         List<string> valNames = new();
@@ -289,7 +289,7 @@ public partial class SerializerGenerator
                 if (isPrivate)
                 {
                     var accessName = valName;
-                    if (type.TypeSymbol.IsValueType)
+                    if (type.TypeInfo.IsValueType)
                     {
                         accessName = $"ref {valName}";
                     }
@@ -328,24 +328,24 @@ public partial class SerializerGenerator
                 }
                 else
                 {
-                    var kind = declaredType.GetKind(NinoGraph, GeneratedBuiltInTypes);
+                    var kind = declaredType.GetKind(NinoGraph, GeneratedBuiltInTypeIds);
 
                     switch (kind)
                     {
-                        case NinoTypeHelper.NinoTypeKind.Unmanaged:
+                        case NinoTypeKind.Unmanaged:
                             // PRIORITY 2: Unmanaged types - write directly
                             sb.AppendLine($"{indent}            writer.Write({val});");
                             break;
 
-                        case NinoTypeHelper.NinoTypeKind.Boxed:
+                        case NinoTypeKind.Boxed:
                             // PRIORITY 3: Object type - call boxed API in NinoSerializer directly
                             sb.AppendLine(
                                 $"{indent}            NinoSerializer.SerializeBoxed({val}, ref writer, {val}?.GetType());");
                             break;
 
-                        case NinoTypeHelper.NinoTypeKind.BuiltIn:
+                        case NinoTypeKind.BuiltIn:
                             // PRIORITY 4: String types (UTF8 and UTF16 optimizations) or built-in types
-                            if (declaredType.SpecialType == SpecialType.System_String)
+                            if (declaredType.SpecialType == SpecialTypeDto.System_String)
                             {
                                 if (member.IsUtf8String)
                                 {
@@ -363,7 +363,7 @@ public partial class SerializerGenerator
 
                             break;
 
-                        case NinoTypeHelper.NinoTypeKind.NinoType:
+                        case NinoTypeKind.NinoType:
                             // PRIORITY 5: NinoType - use CachedSerializer
                             if (TryGetInlineSerializeCall(declaredType, val, out var inlineCall))
                             {
@@ -380,32 +380,9 @@ public partial class SerializerGenerator
                         default:
                             // PRIORITY 6: Invalid/unrecognizable type - report warning
                             sb.AppendLine(
-                                $"{indent}            // WARNING: Member '{member.Name}' of type '{declaredType.GetDisplayString()}' cannot be serialized (unrecognizable type)");
-                            // Only report the warning once to avoid duplicates between serializer and deserializer
-                            if (!member.HasReportedUnrecognizableTypeWarning)
-                            {
-                                // Check if member is from current compilation to determine location
-                                var memberAssembly = member.MemberSymbol.ContainingType.ContainingAssembly;
-                                var isCurrentAssembly =
-                                    SymbolEqualityComparer.Default.Equals(memberAssembly, Compilation.Assembly);
-                                var diagnosticLocation = isCurrentAssembly
-                                    ? (member.MemberSymbol.Locations.FirstOrDefault() ??
-                                       type.TypeSymbol.Locations.FirstOrDefault() ?? Location.None)
-                                    : Location.None;
-
-                                spc.ReportDiagnostic(Diagnostic.Create(
-                                    new DiagnosticDescriptor("NINO011",
-                                        "Member type cannot be serialized",
-                                        "Member '{0}' of type '{1}' in NinoType '{2}' has an unrecognizable type and will be skipped during serialization/deserialization",
-                                        "Nino",
-                                        DiagnosticSeverity.Warning, true),
-                                    diagnosticLocation,
-                                    member.Name,
-                                    declaredType.GetDisplayString(),
-                                    type.TypeSymbol.GetDisplayString()));
-                                member.HasReportedUnrecognizableTypeWarning = true;
-                            }
-
+                                $"{indent}            // WARNING: Member '{member.Name}' of type '{declaredType.DisplayName}' cannot be serialized (unrecognizable type)");
+                            // Note: Diagnostic reporting with source locations is not available in DTO-based pipeline
+                            // Consider reporting diagnostics during the extraction phase in SymbolDataExtractor
                             break;
                     }
                 }
@@ -413,7 +390,7 @@ public partial class SerializerGenerator
             else
             {
                 // Standard path with version tolerance support
-                sb.AppendLine($"{indent}#if {NinoTypeHelper.WeakVersionToleranceSymbol}");
+                sb.AppendLine($"{indent}#if {NinoConstants.WeakVersionToleranceSymbol}");
                 foreach (var val in valNames)
                 {
                     sb.AppendLine($"{indent}            writer.Write({val});");

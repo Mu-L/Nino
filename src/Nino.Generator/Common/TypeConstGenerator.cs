@@ -7,28 +7,31 @@ using Nino.Generator.Template;
 
 namespace Nino.Generator.Common;
 
-public class TypeConstGenerator(Compilation compilation, NinoGraph ninoGraph, List<NinoType> ninoTypes)
-    : NinoCommonGenerator(compilation, ninoGraph, ninoTypes)
+public class TypeConstGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
+    NinoGraph ninoGraph,
+    EquatableArray<NinoType> ninoTypes)
+    : NinoCommonGenerator(typeInfoCache, assemblyNamespace, ninoGraph, ninoTypes)
 {
     protected override void Generate(SourceProductionContext spc)
     {
-        var compilation = Compilation;
-
         // get type full names from models (namespaces + type names)
         var serializableTypes = NinoTypes
-            .Where(ninoType => ninoType.IsPolymorphic())
-            .Select(type => type.TypeSymbol)
-            .Where(symbol => symbol.IsInstanceType()).ToList();
+            .Where(ninoType => ninoType.IsPolymorphic)
+            .Select(type => type.TypeInfo)
+            .Where(typeInfo => TypeInfoDtoExtensions.IsInstanceType(typeInfo))
+            .ToList();
 
         var types = new StringBuilder();
-        foreach (var type in serializableTypes)
+        foreach (var typeInfo in serializableTypes)
         {
-            string variableName = type.GetTypeFullName().GetTypeConstName();
-            types.AppendLine($"\t\t// {type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}");
-            types.AppendLine($"\t\tpublic const int {variableName} = {type.GetId()};");
+            string variableName = typeInfo.FullyQualifiedName.GetTypeConstName();
+            types.AppendLine($"\t\t// {typeInfo.FullyQualifiedName}");
+            types.AppendLine($"\t\tpublic const int {variableName} = {typeInfo.TypeId};");
         }
 
-        var curNamespace = compilation.AssemblyName!.GetNamespace();
+        var curNamespace = AssemblyNamespace;
 
         // generate code
         var code = $$"""

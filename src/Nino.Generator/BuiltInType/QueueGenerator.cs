@@ -31,41 +31,43 @@ using Nino.Generator.Template;
 namespace Nino.Generator.BuiltInType;
 
 public class QueueGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    HashSet<ITypeSymbol> potentialTypes,
-    HashSet<ITypeSymbol> selectedTypes,
-    Compilation compilation) : NinoBuiltInTypeGenerator(ninoGraph, potentialTypes, selectedTypes, compilation)
+    HashSet<int> potentialTypeIds,
+    HashSet<int> selectedTypeIds,
+    bool isUnityAssembly = false) : NinoBuiltInTypeGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly)
 {
     protected override string OutputFileName => "NinoQueueTypeGenerator";
 
-    public override bool Filter(ITypeSymbol typeSymbol)
+    public override bool Filter(TypeInfoDto typeInfo)
     {
-        if (typeSymbol is not INamedTypeSymbol namedType) return false;
+        if (!typeInfo.IsGenericType) return false;
+        if (typeInfo.TypeArguments.Length != 1) return false;
 
         // Accept Queue<T> and ConcurrentQueue<T>
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         if (originalDef != "System.Collections.Generic.Queue<T>" &&
             originalDef != "System.Collections.Concurrent.ConcurrentQueue<T>")
             return false;
 
-        var elementType = namedType.TypeArguments[0];
+        var elementType = typeInfo.TypeArguments[0];
 
         // Element type must be valid
-        if (elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid)
+        if (TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid)
             return false;
 
         return true;
     }
 
-    protected override void GenerateSerializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateSerializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var elementType = namedType.TypeArguments[0];
+        var elementType = typeInfo.TypeArguments[0];
 
-        var typeName = typeSymbol.GetDisplayString();
+        var typeName = typeInfo.DisplayName;
 
         // Check if element is unmanaged (no WeakVersionTolerance needed)
-        bool isUnmanaged = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool isUnmanaged = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         WriteAggressiveInlining(writer);
         writer.Append("public static void Serialize(this ");
@@ -89,13 +91,13 @@ public class QueueGenerator(
         writer.AppendLine("    }");
         writer.AppendLine();
 
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         bool isQueue = originalDef == "System.Collections.Generic.Queue<T>";
 
         if (isQueue)
         {
             writer.AppendLine("#if NET5_0_OR_GREATER");
-            var queueViewTypeName = $"Nino.Core.Internal.QueueView<{elementType.GetDisplayString()}>";
+            var queueViewTypeName = $"Nino.Core.Internal.QueueView<{elementType.DisplayName}>";
             writer.Append("    ref var queue = ref System.Runtime.CompilerServices.Unsafe.As<");
             writer.Append(typeName);
             writer.Append(", ");
@@ -138,13 +140,13 @@ public class QueueGenerator(
                 writer.AppendLine("        do");
                 writer.AppendLine("        {");
 
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("            var pos = writer.Advance(4);"); });
 
                 writer.Append("            ");
                 writer.AppendLine(GetSerializeString(elementType, "cur"));
 
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("            writer.PutLength(pos);"); });
 
                 writer.AppendLine("            cur = ref System.Runtime.CompilerServices.Unsafe.Add(ref cur, 1);");
@@ -159,13 +161,13 @@ public class QueueGenerator(
                 writer.AppendLine("        do");
                 writer.AppendLine("        {");
 
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("            var pos = writer.Advance(4);"); });
 
                 writer.Append("            ");
                 writer.AppendLine(GetSerializeString(elementType, "cur"));
 
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("            writer.PutLength(pos);"); });
 
                 writer.AppendLine("            cur = ref System.Runtime.CompilerServices.Unsafe.Add(ref cur, 1);");
@@ -178,13 +180,13 @@ public class QueueGenerator(
                 writer.AppendLine("        do");
                 writer.AppendLine("        {");
 
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("            var pos = writer.Advance(4);"); });
 
                 writer.Append("            ");
                 writer.AppendLine(GetSerializeString(elementType, "cur"));
 
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("            writer.PutLength(pos);"); });
 
                 writer.AppendLine("            cur = ref System.Runtime.CompilerServices.Unsafe.Add(ref cur, 1);");
@@ -199,7 +201,7 @@ public class QueueGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        var pos = writer.Advance(4);"); });
             }
 
@@ -208,7 +210,7 @@ public class QueueGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        writer.PutLength(pos);"); });
             }
 
@@ -223,7 +225,7 @@ public class QueueGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        var pos = writer.Advance(4);"); });
             }
 
@@ -232,7 +234,7 @@ public class QueueGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        writer.PutLength(pos);"); });
             }
 
@@ -242,14 +244,13 @@ public class QueueGenerator(
         writer.AppendLine("}");
     }
 
-    protected override void GenerateDeserializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateDeserializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var elementType = namedType.TypeArguments[0];
-        var typeName = typeSymbol.GetDisplayString();
+        var elementType = typeInfo.TypeArguments[0];
+        var typeName = typeInfo.DisplayName;
 
         // Check if element is unmanaged (no WeakVersionTolerance needed)
-        bool isUnmanaged = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool isUnmanaged = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         // Out overload
         WriteAggressiveInlining(writer);
@@ -269,20 +270,20 @@ public class QueueGenerator(
 
         if (!isUnmanaged)
         {
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("    Reader eleReader;"); });
             writer.AppendLine();
         }
 
         // ConcurrentQueue doesn't support capacity parameter, only Queue does
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         bool isQueue = originalDef == "System.Collections.Generic.Queue<T>";
 
         if (isQueue)
         {
             writer.AppendLine("#if NET5_0_OR_GREATER");
             // For Queue<T>, directly construct internal array and use Unsafe.As for efficiency
-            var elemType = elementType.GetDisplayString();
+            var elemType = elementType.DisplayName;
             var queueViewTypeName = $"Nino.Core.Internal.QueueView<{elemType}>";
 
             if (isUnmanaged)
@@ -307,7 +308,7 @@ public class QueueGenerator(
                 writer.AppendLine("    for (int i = 0; i < length; i++)");
                 writer.AppendLine("    {");
 
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
@@ -352,7 +353,7 @@ public class QueueGenerator(
             }
             else
             {
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
@@ -386,7 +387,7 @@ public class QueueGenerator(
             }
             else
             {
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
@@ -425,20 +426,20 @@ public class QueueGenerator(
 
         if (!isUnmanaged)
         {
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("    Reader eleReader;"); });
             writer.AppendLine();
         }
 
         // ConcurrentQueue doesn't support capacity parameter, only Queue does
-        var originalDef2 = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef2 = typeInfo.GenericOriginalDefinition;
         bool isQueue2 = originalDef2 == "System.Collections.Generic.Queue<T>";
 
         if (isQueue2)
         {
             writer.AppendLine("#if NET5_0_OR_GREATER");
             // For Queue<T>, reuse existing array if possible, resize if needed
-            var elemType = elementType.GetDisplayString();
+            var elemType = elementType.DisplayName;
             var queueViewTypeName = $"Nino.Core.Internal.QueueView<{elemType}>";
 
             writer.AppendLine("    // Extract existing array or create new, then resize if needed");
@@ -479,7 +480,7 @@ public class QueueGenerator(
                 writer.AppendLine("    for (int i = 0; i < length; i++)");
                 writer.AppendLine("    {");
 
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
@@ -525,7 +526,7 @@ public class QueueGenerator(
             }
             else
             {
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
@@ -568,7 +569,7 @@ public class QueueGenerator(
             }
             else
             {
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");

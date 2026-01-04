@@ -8,114 +8,123 @@ using Nino.Generator.Template;
 namespace Nino.Generator.Common;
 
 public partial class DeserializerGenerator(
-    Compilation compilation,
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    List<NinoType> ninoTypes,
-    HashSet<ITypeSymbol> generatedBuiltInTypes,
+    EquatableArray<NinoType> ninoTypes,
+    HashSet<int> generatedBuiltInTypeIds,
     bool isUnityAssembly)
-    : NinoCommonGenerator(compilation, ninoGraph, ninoTypes, isUnityAssembly)
+    : NinoCommonGenerator(typeInfoCache, assemblyNamespace, ninoGraph, ninoTypes, isUnityAssembly)
 {
-    protected readonly HashSet<ITypeSymbol> GeneratedBuiltInTypes = generatedBuiltInTypes;
+    protected readonly HashSet<int> GeneratedBuiltInTypeIds = generatedBuiltInTypeIds;
 
-    private void GenerateGenericRegister(StringBuilder sb, string name, HashSet<ITypeSymbol> generatedTypes,
-        HashSet<ITypeSymbol> registeredTypes)
+    private void GenerateGenericRegister(StringBuilder sb, string name, HashSet<int> generatedTypeIds,
+        HashSet<int> registeredTypeIds)
     {
         sb.AppendLine($$"""
                                 private static void Register{{name}}Deserializers()
                                 {
                         """);
         // Order types: top types first, then types with base types, then others
-        var orderedTypes = generatedTypes
-            .Where(t => !t.IsRefStruct())
-            .ToList(); // Convert to list first to avoid ordering issues
+        var orderedTypeIds = generatedTypeIds
+            .Where(typeId => TypeInfoCache.TryGetValue(typeId, out var typeInfo) && !typeInfo.IsRefLikeType)
+            .ToList();
 
         // Manual ordering instead of OrderBy to avoid IComparable issues
-        var topTypes = orderedTypes.Where(t =>
-            NinoGraph.TopTypes.Any(topType => SymbolEqualityComparer.Default.Equals(topType.TypeSymbol, t))).ToList();
-        var typeMapTypes = orderedTypes.Where(t =>
-            NinoGraph.TypeMap.ContainsKey(t.GetDisplayString()) &&
-            !NinoGraph.TopTypes.Any(topType => SymbolEqualityComparer.Default.Equals(topType.TypeSymbol, t))).ToList();
-        var otherTypes = orderedTypes.Where(t =>
-            !NinoGraph.TypeMap.ContainsKey(t.GetDisplayString()) &&
-            !NinoGraph.TopTypes.Any(topType => SymbolEqualityComparer.Default.Equals(topType.TypeSymbol, t))).ToList();
-
-        foreach (var type in topTypes.Concat(typeMapTypes).Concat(otherTypes))
+        var topTypeIds = orderedTypeIds.Where(typeId =>
+            NinoGraph.TopTypes.Any(topType => topType.TypeInfo.TypeId == typeId)).ToList();
+        var typeMapTypeIds = orderedTypeIds.Where(typeId =>
         {
-            var typeFullName = type.GetDisplayString();
-            if (NinoGraph.TypeMap.TryGetValue(type.GetDisplayString(), out var ninoType))
+            if (!TypeInfoCache.TryGetValue(typeId, out var typeInfo)) return false;
+            return NinoGraph.TypeMap.ContainsKey(typeInfo.DisplayName) &&
+                   !NinoGraph.TopTypes.Any(topType => topType.TypeInfo.TypeId == typeId);
+        }).ToList();
+        var otherTypeIds = orderedTypeIds.Where(typeId =>
+        {
+            if (!TypeInfoCache.TryGetValue(typeId, out var typeInfo)) return false;
+            return !NinoGraph.TypeMap.ContainsKey(typeInfo.DisplayName) &&
+                   !NinoGraph.TopTypes.Any(topType => topType.TypeInfo.TypeId == typeId);
+        }).ToList();
+
+        foreach (var typeId in topTypeIds.Concat(typeMapTypeIds).Concat(otherTypeIds))
+        {
+            if (!TypeInfoCache.TryGetValue(typeId, out var typeInfo)) continue;
+            var typeFullName = typeInfo.DisplayName;
+
+            if (NinoGraph.TypeMap.TryGetValue(typeInfo.DisplayName, out var ninoType))
             {
                 // Use TryGetValue to avoid KeyNotFoundException during concurrent execution
-                if (!NinoGraph.BaseTypes.TryGetValue(ninoType, out var baseTypes))
-                {
-                    baseTypes = new List<NinoType>();
-                }
+                var baseTypes = NinoGraph.BaseTypes.TryGetValue(ninoType, out var bases)
+                    ? bases
+                    : new List<NinoType>();
+
                 string prefix;
                 foreach (var baseType in baseTypes)
                 {
-                    if (registeredTypes.Add(baseType.TypeSymbol))
+                    if (registeredTypeIds.Add(baseType.TypeInfo.TypeId))
                     {
-                        var baseTypeName = baseType.TypeSymbol.GetDisplayString();
+                        var baseTypeName = baseType.TypeInfo.DisplayName;
                         prefix = !string.IsNullOrEmpty(baseType.CustomDeserializer)
                             ? $"{baseType.CustomDeserializer}."
                             : "";
-                        var method = baseType.TypeSymbol.IsInstanceType() ? $"{prefix}DeserializeImpl" : "null";
-                        var methodRef = baseType.TypeSymbol.IsInstanceType() ? $"{prefix}DeserializeImplRef" : "null";
-                        var baseTypeId = !baseType.IsPolymorphic() || !baseType.TypeSymbol.IsInstanceType()
+                        var method = TypeInfoDtoExtensions.IsInstanceType(baseType.TypeInfo) ? $"{prefix}DeserializeImpl" : "null";
+                        var methodRef = TypeInfoDtoExtensions.IsInstanceType(baseType.TypeInfo) ? $"{prefix}DeserializeImplRef" : "null";
+                        var baseTypeId = !baseType.IsPolymorphic || !TypeInfoDtoExtensions.IsInstanceType(baseType.TypeInfo)
                             ? "-1"
-                            : $"NinoTypeConst.{baseType.TypeSymbol.GetTypeFullName().GetTypeConstName()}";
+                            : $"NinoTypeConst.{baseType.TypeInfo.DisplayName.GetTypeConstName()}";
 
                         // For polymorphic base types, use the polymorphic methods as optimal deserializers
                         var optimalMethod = method;
                         var optimalMethodRef = methodRef;
-                        if (!baseType.TypeSymbol.IsSealedOrStruct())
+                        if (!TypeInfoDtoExtensions.IsSealedOrStruct(baseType.TypeInfo))
                         {
                             optimalMethod = $"{prefix}DeserializePolymorphic";
                             optimalMethodRef = $"{prefix}DeserializeRefPolymorphic";
                         }
 
                         sb.AppendLine($$"""
-                                                    NinoTypeMetadata.RegisterDeserializer<{{baseTypeName}}>({{baseTypeId}}, {{method}}, {{methodRef}}, {{optimalMethod}}, {{optimalMethodRef}}, {{baseType.Parents.Any().ToString().ToLower()}});
+                                                    NinoTypeMetadata.RegisterDeserializer<{{baseTypeName}}>({{baseTypeId}}, {{method}}, {{methodRef}}, {{optimalMethod}}, {{optimalMethodRef}}, {{(baseType.ParentTypeIds.Length > 0).ToString().ToLower()}});
                                         """);
                     }
                 }
 
-                var typeId = !ninoType.IsPolymorphic() || !type.IsInstanceType()
+                var currentTypeId = !ninoType.IsPolymorphic || !TypeInfoDtoExtensions.IsInstanceType(typeInfo)
                     ? "-1"
-                    : $"NinoTypeConst.{type.GetTypeFullName().GetTypeConstName()}";
+                    : $"NinoTypeConst.{typeInfo.DisplayName.GetTypeConstName()}";
                 prefix = !string.IsNullOrEmpty(ninoType.CustomDeserializer) ? $"{ninoType.CustomDeserializer}." : "";
-                if (registeredTypes.Add(type))
+                if (registeredTypeIds.Add(typeId))
                 {
-                    var method = ninoType.TypeSymbol.IsInstanceType() ? $"{prefix}DeserializeImpl" : "null";
-                    var methodRef = ninoType.TypeSymbol.IsInstanceType() ? $"{prefix}DeserializeImplRef" : "null";
+                    var method = TypeInfoDtoExtensions.IsInstanceType(ninoType.TypeInfo) ? $"{prefix}DeserializeImpl" : "null";
+                    var methodRef = TypeInfoDtoExtensions.IsInstanceType(ninoType.TypeInfo) ? $"{prefix}DeserializeImplRef" : "null";
 
                     // For polymorphic types, use the polymorphic methods as optimal deserializers
                     var optimalMethod = method;
                     var optimalMethodRef = methodRef;
-                    if (!ninoType.TypeSymbol.IsSealedOrStruct())
+                    if (!TypeInfoDtoExtensions.IsSealedOrStruct(ninoType.TypeInfo))
                     {
                         optimalMethod = $"{prefix}DeserializePolymorphic";
                         optimalMethodRef = $"{prefix}DeserializeRefPolymorphic";
                     }
 
                     sb.AppendLine($$"""
-                                                NinoTypeMetadata.RegisterDeserializer<{{typeFullName}}>({{typeId}}, {{method}}, {{methodRef}}, {{optimalMethod}}, {{optimalMethodRef}}, {{ninoType.Parents.Any().ToString().ToLower()}});
+                                                NinoTypeMetadata.RegisterDeserializer<{{typeFullName}}>({{currentTypeId}}, {{method}}, {{methodRef}}, {{optimalMethod}}, {{optimalMethodRef}}, {{(ninoType.ParentTypeIds.Length > 0).ToString().ToLower()}});
                                     """);
                 }
 
-                var meth = ninoType.TypeSymbol.IsInstanceType() ? $"{prefix}DeserializeImpl" : "null";
-                var methRef = ninoType.TypeSymbol.IsInstanceType() ? $"{prefix}DeserializeImplRef" : "null";
+                var meth = TypeInfoDtoExtensions.IsInstanceType(ninoType.TypeInfo) ? $"{prefix}DeserializeImpl" : "null";
+                var methRef = TypeInfoDtoExtensions.IsInstanceType(ninoType.TypeInfo) ? $"{prefix}DeserializeImplRef" : "null";
                 foreach (var baseType in baseTypes)
                 {
-                    var baseTypeName = baseType.TypeSymbol.GetDisplayString();
+                    var baseTypeName = baseType.TypeInfo.DisplayName;
                     sb.AppendLine($$"""
-                                                NinoTypeMetadata.RecordSubTypeDeserializer<{{baseTypeName}}, {{typeFullName}}>({{typeId}},{{meth}}, {{methRef}});
+                                                NinoTypeMetadata.RecordSubTypeDeserializer<{{baseTypeName}}, {{typeFullName}}>({{currentTypeId}},{{meth}}, {{methRef}});
                                     """);
                 }
 
                 continue;
             }
 
-            if (registeredTypes.Add(type))
+            if (registeredTypeIds.Add(typeId))
                 sb.AppendLine($$"""
                                             NinoTypeMetadata.RegisterDeserializer<{{typeFullName}}>(-1, Deserialize, DeserializeRef, Deserialize, DeserializeRef, false);
                                 """);
@@ -126,19 +135,20 @@ public partial class DeserializerGenerator(
 
     protected override void Generate(SourceProductionContext spc)
     {
-        var compilation = Compilation;
-        HashSet<ITypeSymbol> registeredTypes = new(SymbolEqualityComparer.Default);
+        HashSet<int> registeredTypeIds = new();
 
         // Reduced from 32MB to 256KB to avoid LOH allocation and memory fragmentation
         // StringBuilder will automatically grow as needed
         StringBuilder sb = new(262_144); // 256KB
-        HashSet<ITypeSymbol> trivialTypes = new(SymbolEqualityComparer.Default);
-        // add string type
-        trivialTypes.Add(compilation.GetSpecialType(SpecialType.System_String));
-        GenerateTrivialCode(spc, trivialTypes);
-        GenerateGenericRegister(sb, "Trivial", trivialTypes, registeredTypes);
+        HashSet<int> trivialTypeIds = new();
+        GenerateTrivialCode(spc, trivialTypeIds);
+        // add string type (find in cache)
+        var stringTypeId = TypeInfoCache.FirstOrDefault(kvp => kvp.Value.SpecialType == SpecialTypeDto.System_String).Key;
+        if (stringTypeId != 0)
+            trivialTypeIds.Add(stringTypeId);
+        GenerateGenericRegister(sb, "Trivial", trivialTypeIds, registeredTypeIds);
 
-        var curNamespace = compilation.AssemblyName!.GetNamespace();
+        var curNamespace = AssemblyNamespace;
 
         // Unity initialization code (conditional)
         var unityInitCode = IsUnityAssembly ? """

@@ -37,43 +37,55 @@ namespace Nino.Generator.BuiltInType;
 /// This reduces file count from 3*N to 3 files total (Serializer, Deserializer, Registration).
 /// </summary>
 public class NinoBuiltInTypesGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    HashSet<ITypeSymbol> potentialTypes,
-    HashSet<ITypeSymbol> generatedTypes,
-    Compilation compilation,
-    bool isUnityAssembly) : NinoGenerator(compilation, isUnityAssembly)
+    HashSet<int> potentialTypeIds,
+    HashSet<int> selectedTypeIds,
+    bool isUnityAssembly) : NinoGenerator(typeInfoCache, assemblyNamespace, isUnityAssembly)
 {
     private readonly NinoBuiltInTypeGenerator[] _generators =
     {
-        new NullableGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new KeyValuePairGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new TupleGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new ArrayGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new DictionaryGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new ListGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new ArraySegmentGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new QueueGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new StackGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new HashSetGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new LinkedListGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new ImmutableArrayGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new ImmutableListGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new PriorityQueueGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
-        new SortedSetGenerator(ninoGraph, potentialTypes, generatedTypes, compilation),
+        new NullableGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new KeyValuePairGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new TupleGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new ArrayGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new DictionaryGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new ListGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new ArraySegmentGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new QueueGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new StackGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new HashSetGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new LinkedListGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new ImmutableArrayGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new ImmutableListGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new PriorityQueueGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
+        new SortedSetGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly),
     };
 
     protected override void Generate(SourceProductionContext spc)
     {
         // Clear and pre-filter to identify which types are handled by built-in generators
-        generatedTypes.Clear();
-        var filterTypes = potentialTypes.ToList().OrderBy(static t => t.GetTypeHierarchyLevel()).ToList();
-        foreach (var type in filterTypes)
+        selectedTypeIds.Clear();
+        var filterTypeIds = potentialTypeIds.ToList()
+            .OrderBy(typeId =>
+            {
+                if (!typeInfoCache.TryGetValue(typeId, out var typeInfo)) return int.MaxValue;
+                // For built-in types, hierarchy level is not critical for ordering
+                // Use empty parent list for ordering purposes
+                return typeInfo.GetTypeHierarchyLevel(EquatableArray<int>.Empty);
+            })
+            .ToList();
+
+        foreach (var typeId in filterTypeIds)
         {
+            if (!typeInfoCache.TryGetValue(typeId, out var typeInfo)) continue;
+
             foreach (var generator in _generators)
             {
-                if (generator.Filter(type))
+                if (generator.Filter(typeInfo))
                 {
-                    generatedTypes.Add(type);
+                    selectedTypeIds.Add(typeId);
                     break;
                 }
             }
@@ -83,39 +95,41 @@ public class NinoBuiltInTypesGenerator(
         serializerWriter.AppendLine();
         NinoBuiltInTypeGenerator.Writer deserializerWriter = new("        ");
         deserializerWriter.AppendLine();
-        HashSet<ITypeSymbol> registeredTypes = new(TupleSanitizedEqualityComparer.Default);
+        HashSet<int> registeredTypeIds = new();
 
         // Process each generator and collect their outputs
         foreach (var generator in _generators)
         {
-            var (serializerCode, deserializerCode, types) = generator.GenerateCode(potentialTypes);
+            var (serializerCode, deserializerCode, typeIds) = generator.GenerateCode(potentialTypeIds);
 
-            if (types.Count > 0)
+            if (typeIds.Count > 0)
             {
                 serializerWriter.Append(serializerCode);
                 serializerWriter.AppendLine();
                 deserializerWriter.Append(deserializerCode);
                 deserializerWriter.AppendLine();
 
-                foreach (var type in types)
+                foreach (var typeId in typeIds)
                 {
-                    registeredTypes.Add(type);
+                    registeredTypeIds.Add(typeId);
                 }
             }
         }
 
         // Generate registration code
         StringBuilder registrationCode = new();
-        foreach (var registeredType in registeredTypes)
+        foreach (var typeId in registeredTypeIds)
         {
-            var typeName = registeredType.GetDisplayString();
+            if (!typeInfoCache.TryGetValue(typeId, out var typeInfo)) continue;
+
+            var typeName = typeInfo.DisplayName;
             registrationCode.AppendLine(
                 $"                NinoTypeMetadata.RegisterSerializer<{typeName}>(Serializer.Serialize, false);");
             registrationCode.AppendLine(
                 $"                NinoTypeMetadata.RegisterDeserializer<{typeName}>(-1, Deserializer.Deserialize, Deserializer.DeserializeRef, Deserializer.Deserialize, Deserializer.DeserializeRef, false);");
         }
 
-        var curNamespace = Compilation.AssemblyName!.GetNamespace();
+        var curNamespace = AssemblyNamespace;
 
         // Generate serializer file
         var code = $$"""

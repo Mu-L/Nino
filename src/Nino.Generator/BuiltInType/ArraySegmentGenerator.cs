@@ -31,40 +31,42 @@ using Nino.Generator.Template;
 namespace Nino.Generator.BuiltInType;
 
 public class ArraySegmentGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    HashSet<ITypeSymbol> potentialTypes,
-    HashSet<ITypeSymbol> selectedTypes,
-    Compilation compilation) : NinoBuiltInTypeGenerator(ninoGraph, potentialTypes, selectedTypes, compilation)
+    HashSet<int> potentialTypeIds,
+    HashSet<int> selectedTypeIds,
+    bool isUnityAssembly = false) : NinoBuiltInTypeGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly)
 {
     protected override string OutputFileName => "NinoArraySegmentTypeGenerator";
 
-    public override bool Filter(ITypeSymbol typeSymbol)
+    public override bool Filter(TypeInfoDto typeInfo)
     {
-        if (typeSymbol is not INamedTypeSymbol namedType) return false;
+        if (!typeInfo.IsGenericType) return false;
+        if (typeInfo.TypeArguments.Length != 1) return false;
 
         // Only accept ArraySegment<T>
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         if (originalDef != "System.ArraySegment<T>")
             return false;
 
-        var elementType = namedType.TypeArguments[0];
+        var elementType = typeInfo.TypeArguments[0];
 
         // Element type must be valid
-        if (elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid)
+        if (TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid)
             return false;
 
         return true;
     }
 
-    protected override void GenerateSerializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateSerializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var elementType = namedType.TypeArguments[0];
+        var elementType = typeInfo.TypeArguments[0];
 
-        var typeName = typeSymbol.GetDisplayString();
+        var typeName = typeInfo.DisplayName;
 
         // Check if element type is unmanaged for fast path
-        bool canUseFastPath = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool canUseFastPath = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         WriteAggressiveInlining(writer);
         writer.Append("public static void Serialize(this ");
@@ -96,12 +98,12 @@ public class ArraySegmentGenerator(
             // For managed element types, serialize element by element
             writer.AppendLine("    for (int i = 0; i < cnt; i++)");
             writer.AppendLine("    {");
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("        var pos = writer.Advance(4);"); });
 
             writer.Append("        ");
             writer.AppendLine(GetSerializeString(elementType, "value[i]"));
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("        writer.PutLength(pos);"); });
             writer.AppendLine("    }");
         }
@@ -109,15 +111,14 @@ public class ArraySegmentGenerator(
         writer.AppendLine("}");
     }
 
-    protected override void GenerateDeserializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateDeserializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var elementType = namedType.TypeArguments[0];
-        var elemType = elementType.GetDisplayString();
-        var typeName = typeSymbol.GetDisplayString();
+        var elementType = typeInfo.TypeArguments[0];
+        var elemType = elementType.DisplayName;
+        var typeName = typeInfo.DisplayName;
 
         // Check if element type is unmanaged for fast path
-        bool canUseFastPath = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool canUseFastPath = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         // Out overload
         WriteAggressiveInlining(writer);
@@ -148,7 +149,7 @@ public class ArraySegmentGenerator(
             writer.AppendLine();
 
             // For managed element types, deserialize element by element
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("    Reader eleReader;"); });
             writer.AppendLine();
 
@@ -158,7 +159,7 @@ public class ArraySegmentGenerator(
             writer.AppendLine("    for (int i = 0; i < length; i++)");
             writer.AppendLine("    {");
 
-            IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w =>
                 {
                     w.AppendLine("        eleReader = reader.Slice();");

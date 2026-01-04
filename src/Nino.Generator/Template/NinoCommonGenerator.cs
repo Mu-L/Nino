@@ -4,9 +4,14 @@ using Nino.Generator.Metadata;
 
 namespace Nino.Generator.Template;
 
-public abstract class NinoCommonGenerator(Compilation compilation, NinoGraph ninoGraph, List<NinoType> ninoTypes, bool isUnityAssembly = false)
-    : NinoGenerator(compilation, isUnityAssembly)
+public abstract class NinoCommonGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
+    NinoGraph ninoGraph,
+    EquatableArray<NinoType> ninoTypes,
+    bool isUnityAssembly = false)
+    : NinoGenerator(typeInfoCache, assemblyNamespace, isUnityAssembly)
 {
     protected readonly NinoGraph NinoGraph = ninoGraph;
-    protected readonly List<NinoType> NinoTypes = ninoTypes;
+    protected readonly EquatableArray<NinoType> NinoTypes = ninoTypes;
 }

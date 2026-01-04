@@ -2,13 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Nino.Generator.BuiltInType;
 using Nino.Generator.Common;
-using Nino.Generator.DTOs;
 using Nino.Generator.Metadata;
-using Nino.Generator.Parser;
+using Nino.Generator.Pipeline;
 using Nino.Generator.Template;
 
 namespace Nino.Generator;
@@ -18,299 +16,436 @@ public class GlobalGenerator : IIncrementalGenerator
 {
     /// <summary>
     /// Initialize the incremental source generator pipeline.
-    /// Extracts metadata and syntax information to build type graphs for code generation.
+    /// Uses multi-stage incremental pipeline with pure DTO transformations for optimal caching.
     /// </summary>
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        // Extract compilation metadata into a value-based DTO for efficient incremental caching
+        // ===================================================================
+        // STAGE 1: Extract Compilation Metadata (value-based for caching)
+        // ===================================================================
         var compilationMetadata = context.CompilationProvider
-            .Select(static (compilation, _) => TypeTransformations.ExtractCompilationMetadata(compilation));
+            .Select(static (compilation, _) =>
+            {
+                var isUnityAssembly = compilation.ReferencedAssemblyNames.Any(a =>
+                    a.Name == "UnityEngine" ||
+                    a.Name == "UnityEngine.CoreModule" ||
+                    a.Name == "UnityEditor");
 
-        // Scan types directly marked with [NinoType]
-        var ninoTypeModels = context.GetTypeSyntaxes()
-            .Where(static syntax => syntax != null)
+                var hasNinoCoreUsage = compilation.SyntaxTrees.Any(tree =>
+                    tree.GetRoot().DescendantNodes()
+                        .OfType<UsingDirectiveSyntax>()
+                        .Any(u => u.Name.ToString().Contains("Nino.Core")));
+
+                var assemblyName = compilation.AssemblyName ?? "Unknown";
+                var assemblyNamespace = assemblyName.GetNamespace();
+
+                return new CompilationMetadata(
+                    AssemblyName: assemblyName,
+                    IsUnityAssembly: isUnityAssembly,
+                    HasNinoCoreUsage: hasNinoCoreUsage,
+                    AssemblyNamespace: assemblyNamespace
+                );
+            });
+
+        // ===================================================================
+        // STAGE 2: Extract NinoType DTOs from [NinoType] attributed types
+        // ===================================================================
+        var directNinoTypes = context.SyntaxProvider
+            .ForAttributeWithMetadataName(
+                "Nino.Core.NinoTypeAttribute",
+                predicate: static (s, _) => s is TypeDeclarationSyntax,
+                transform: static (ctx, ct) =>
+                {
+                    if (ctx.TargetSymbol is not ITypeSymbol typeSymbol)
+                        return (NinoType?)null;
+
+                    // Only process public types
+                    if (typeSymbol.DeclaredAccessibility != Accessibility.Public)
+                        return (NinoType?)null;
+
+                    // Skip invalid generic types
+                    if (!typeSymbol.CheckGenericValidity())
+                        return (NinoType?)null;
+
+                    // Extract complete type information into DTO
+                    var typeInfo = SymbolDataExtractor.ExtractTypeInfo(typeSymbol, ct);
+
+                    // Get NinoType attribute data
+                    var ninoAttr = SymbolDataExtractor.GetNinoTypeAttribute(typeSymbol);
+
+                    // Extract members
+                    var members = SymbolDataExtractor.ExtractMembers(
+                        typeSymbol,
+                        ninoAttr?.ContainNonPublicMembers ?? false,
+                        ct);
+
+                    // Extract parent type IDs (base class + interfaces)
+                    var parentIds = SymbolDataExtractor.ExtractParentTypeIds(typeSymbol, ct);
+
+                    // Extract custom serializers from referenced assemblies
+                    var compilation = ctx.SemanticModel.Compilation;
+                    var (customSer, customDeser) =
+                        SymbolDataExtractor.ExtractCustomSerializers(
+                            typeSymbol,
+                            compilation.Assembly);
+
+                    // Extract RefDeserializationMethod
+                    var refDeser = SymbolDataExtractor.ExtractRefDeserializationMethod(typeSymbol);
+
+                    // Extract constructors for deserialization
+                    var constructors = SymbolDataExtractor.ExtractConstructors(typeSymbol, ct);
+
+                    // Build NinoType DTO
+                    // NOTE: IsPolymorphic, IsCircular, HierarchyLevel will be computed in graph building phase
+                    return new NinoType
+                    {
+                        TypeInfo = typeInfo,
+                        Members = members,
+                        ParentTypeIds = parentIds,
+                        CustomSerializer = customSer,
+                        CustomDeserializer = customDeser,
+                        RefDeserializationMethod = refDeser,
+                        Constructors = constructors,
+                        IsPolymorphic = false, // computed in graph phase
+                        IsCircular = false,    // computed in graph phase
+                        HierarchyLevel = 0     // computed in graph phase
+                    };
+                })
+            .Where(static nt => nt != null)
             .Collect();
 
-        // Scan type declarations that could potentially be NinoTypes (have attributes or base types)
-        var allTypeDeclarations = context.SyntaxProvider
-            .CreateSyntaxProvider<CSharpSyntaxNode>(
-                static (node, _) =>
+        // ===================================================================
+        // STAGE 3: Extract NinoType DTOs from inherited types
+        // ===================================================================
+        var inheritedNinoTypes = context.SyntaxProvider
+            .CreateSyntaxProvider(
+                predicate: static (node, _) =>
                     node is TypeDeclarationSyntax tds &&
                     (tds.AttributeLists.Count > 0 || tds.BaseList != null),
-                static (context, _) => (CSharpSyntaxNode)context.Node
-            )
-            .Where(static syntax => syntax != null)
+                transform: static (ctx, ct) =>
+                {
+                    if (ctx.SemanticModel.GetDeclaredSymbol(ctx.Node, ct) is not ITypeSymbol typeSymbol)
+                        return (NinoType?)null;
+
+                    // Only process public types
+                    if (typeSymbol.DeclaredAccessibility != Accessibility.Public)
+                        return (NinoType?)null;
+
+                    // Skip invalid generic types
+                    if (!typeSymbol.CheckGenericValidity())
+                        return (NinoType?)null;
+
+                    // Check if this type inherits NinoTypeAttribute
+                    if (!SymbolDataExtractor.IsNinoType(typeSymbol))
+                        return (NinoType?)null;
+
+                    // Extract complete type information into DTO
+                    var typeInfo = SymbolDataExtractor.ExtractTypeInfo(typeSymbol, ct);
+
+                    // Get NinoType attribute data (may be inherited)
+                    var ninoAttr = SymbolDataExtractor.GetNinoTypeAttribute(typeSymbol);
+
+                    // Extract members
+                    var members = SymbolDataExtractor.ExtractMembers(
+                        typeSymbol,
+                        ninoAttr?.ContainNonPublicMembers ?? false,
+                        ct);
+
+                    // Extract parent type IDs
+                    var parentIds = SymbolDataExtractor.ExtractParentTypeIds(typeSymbol, ct);
+
+                    // Extract custom serializers
+                    var compilation = ctx.SemanticModel.Compilation;
+                    var (customSer, customDeser) =
+                        SymbolDataExtractor.ExtractCustomSerializers(
+                            typeSymbol,
+                            compilation.Assembly);
+
+                    // Extract RefDeserializationMethod
+                    var refDeser = SymbolDataExtractor.ExtractRefDeserializationMethod(typeSymbol);
+
+                    // Extract constructors for deserialization
+                    var constructors = SymbolDataExtractor.ExtractConstructors(typeSymbol, ct);
+
+                    // Build NinoType DTO
+                    return new NinoType
+                    {
+                        TypeInfo = typeInfo,
+                        Members = members,
+                        ParentTypeIds = parentIds,
+                        CustomSerializer = customSer,
+                        CustomDeserializer = customDeser,
+                        RefDeserializationMethod = refDeser,
+                        Constructors = constructors,
+                        IsPolymorphic = false, // computed in graph phase
+                        IsCircular = false,    // computed in graph phase
+                        HierarchyLevel = 0     // computed in graph phase
+                    };
+                })
+            .Where(static nt => nt != null)
             .Collect();
 
-        var typeDeclarations = context.SyntaxProvider
-            .CreateSyntaxProvider(
-                static (node, _) =>
-                    node is GenericNameSyntax or ArrayTypeSyntax
-                        or NullableTypeSyntax or TupleTypeSyntax,
-                static (context, _) => (TypeSyntax)context.Node
-            )
-            .Where(static type => type != null)
-            .Select(static (type, _) => type!)
-            .Collect();
-
-        // Combine all pipeline inputs for source generation
-        var merged = compilationMetadata
-            .Combine(typeDeclarations)
-            .Combine(ninoTypeModels)
-            .Combine(allTypeDeclarations)
-            .Combine(context.CompilationProvider);
-
-        // Register source output callback to generate code
-        context.RegisterSourceOutput(merged, static (spc, source) =>
-        {
-            // Unpack pipeline inputs
-            var compilationMetadata = source.Left.Left.Left.Left;
-            var typeSyntaxes = source.Left.Left.Left.Right;
-            var ninoTypeSyntaxes = source.Left.Left.Right;
-            var allTypeDeclarations = source.Left.Right;
-            var compilation = source.Right;
-
-            if (compilation == null) return;
-
-            try
+        // ===================================================================
+        // STAGE 4: Merge and Deduplicate NinoTypes by TypeId
+        // ===================================================================
+        var allNinoTypes = directNinoTypes
+            .Combine(inheritedNinoTypes)
+            .Select(static (combined, _) =>
             {
+                var (direct, inherited) = combined;
+
+                // Use TypeId-based dictionary for deduplication
+                var uniqueTypes = new Dictionary<int, NinoType>();
+
+                // Add directly attributed types first (prefer these)
+                foreach (var ninoType in direct)
+                {
+                    if (ninoType.HasValue)
+                    {
+                        var nt = ninoType.Value;
+                        uniqueTypes[nt.TypeInfo.TypeId] = nt;
+                    }
+                }
+
+                // Add inherited types if not already present
+                foreach (var ninoType in inherited)
+                {
+                    if (ninoType.HasValue)
+                    {
+                        var nt = ninoType.Value;
+                        if (!uniqueTypes.ContainsKey(nt.TypeInfo.TypeId))
+                        {
+                            uniqueTypes[nt.TypeInfo.TypeId] = nt;
+                        }
+                    }
+                }
+
+                return new EquatableArray<NinoType>(uniqueTypes.Values.ToArray());
+            });
+
+        // ===================================================================
+        // STAGE 5: Build Type Hierarchy Graph from Pure DTOs
+        // ===================================================================
+        var graphProvider = allNinoTypes
+            .Select(static (ninoTypes, ct) =>
+            {
+                // Build complete type hierarchy graph using pure DTO logic
+                // This replaces the old NinoGraph constructor
+                return NinoGraphBuilder.Build(ninoTypes, ct);
+            });
+
+        // ===================================================================
+        // STAGE 6: Combine Metadata and Graph for Code Generation
+        // ===================================================================
+        var finalProvider = compilationMetadata.Combine(graphProvider);
+
+        // ===================================================================
+        // STAGE 7: Generate Code (Pure DTOs - No ITypeSymbol!)
+        // ===================================================================
+        context.RegisterSourceOutput(finalProvider,
+            (spc, source) =>
+            {
+                CompilationMetadata metadata = source.Left;
+                NinoGraph graph = source.Right;
+
                 // Early exit if compilation doesn't reference Nino.Core
-                if (!compilationMetadata.HasNinoCoreUsage) return;
+                if (!metadata.HasNinoCoreUsage)
+                    return;
 
-                var (isValid, newCompilation, _) = compilation.IsValidCompilation();
-                if (!isValid) return;
-                compilation = newCompilation;
-
-                // Override isUnityAssembly from metadata (already computed)
-                var isUnityAssembly = compilationMetadata.IsUnityAssembly;
-
-                // all types
-                HashSet<ITypeSymbol> allTypes = new(TupleSanitizedEqualityComparer.Default);
-                // track which referenced assemblies we've already scanned for NinoTypes
-                HashSet<IAssemblySymbol> scannedAssemblies = new(SymbolEqualityComparer.Default);
-                scannedAssemblies.Add(compilation.Assembly); // don't scan current assembly
-
-                // process all scanned type syntaxes (generic, array, nullable, tuple, parametrized nino types)
-                foreach (var syntax in typeSyntaxes)
-                {
-                    var typeSymbol = syntax.GetTypeSymbol(compilation);
-                    if (typeSymbol != null
-                        && typeSymbol.IsAccessible()
-                        && typeSymbol.CheckGenericValidity())
-                    {
-                        var type = typeSymbol.GetNormalizedTypeSymbol().GetPureType();
-                        allTypes.Add(type);
-                    }
-                }
-
-                // process all explicitly marked nino types
-                foreach (var ninoSyntax in ninoTypeSyntaxes)
-                {
-                    var typeSymbol = ninoSyntax.GetTypeSymbol(compilation);
-                    if (typeSymbol != null
-                        && typeSymbol.DeclaredAccessibility == Accessibility.Public
-                        && typeSymbol.CheckGenericValidity())
-                    {
-                        var type = typeSymbol.GetNormalizedTypeSymbol().GetPureType();
-                        allTypes.Add(type);
-                    }
-                }
-
-                // process all type declarations (including those inheriting from NinoType)
-                foreach (var typeSyntax in allTypeDeclarations)
-                {
-                    var typeSymbol = typeSyntax.GetTypeSymbol(compilation);
-                    if (typeSymbol != null
-                        && typeSymbol.DeclaredAccessibility == Accessibility.Public
-                        && typeSymbol.CheckGenericValidity()
-                        && typeSymbol.IsNinoType()) // IsNinoType now checks inheritance
-                    {
-                        var type = typeSymbol.GetNormalizedTypeSymbol().GetPureType();
-                        allTypes.Add(type);
-                    }
-                }
-
-                // record all array element and generic type arguments
-                Stack<ITypeSymbol> toProcess = new(allTypes);
-                while (toProcess.Count > 0)
-                {
-                    var currentType = toProcess.Pop();
-                    if (currentType is INamedTypeSymbol namedType && namedType.IsGenericType)
-                    {
-                        foreach (var arg in namedType.TypeArguments)
-                        {
-                            var pureArg = arg.GetNormalizedTypeSymbol().GetPureType();
-                            if (allTypes.Add(pureArg))
-                                toProcess.Push(pureArg);
-                        }
-                    }
-                    else if (currentType is IArrayTypeSymbol arrayType)
-                    {
-                        var elemType = arrayType.ElementType.GetNormalizedTypeSymbol().GetPureType();
-                        if (allTypes.Add(elemType))
-                            toProcess.Push(elemType);
-                    }
-
-                    // explore base types if they are NinoTypes
-                    if (currentType is INamedTypeSymbol { BaseType: not null } namedTypeWithBase)
-                    {
-                        var baseType = namedTypeWithBase.BaseType!.GetNormalizedTypeSymbol().GetPureType();
-                        if (baseType.IsNinoType())
-                        {
-                            // If base type is from a referenced assembly, scan that assembly for all NinoTypes
-                            // This ensures we discover all member types even if we can't access private members
-                            var baseAssembly = baseType.ContainingAssembly;
-                            if (!SymbolEqualityComparer.Default.Equals(baseAssembly, compilation.Assembly)
-                                && scannedAssemblies.Add(baseAssembly))
-                            {
-                                NinoTypeHelper.ScanAssemblyForNinoTypes(baseAssembly, allTypes, toProcess);
-                            }
-
-                            // Add base type to processing queue if not already added
-                            if (allTypes.Add(baseType))
-                            {
-                                toProcess.Push(baseType);
-                            }
-                        }
-                    }
-
-                    // explore interface types if they are NinoTypes
-                    if (currentType is INamedTypeSymbol namedTypeWithInterfaces)
-                    {
-                        foreach (var iface in namedTypeWithInterfaces.Interfaces)
-                        {
-                            var ifaceType = iface.GetNormalizedTypeSymbol().GetPureType();
-                            if (ifaceType.IsNinoType())
-                            {
-                                // If interface is from a referenced assembly, scan that assembly for all NinoTypes
-                                var ifaceAssembly = ifaceType.ContainingAssembly;
-                                if (!SymbolEqualityComparer.Default.Equals(ifaceAssembly, compilation.Assembly)
-                                    && scannedAssemblies.Add(ifaceAssembly))
-                                {
-                                    NinoTypeHelper.ScanAssemblyForNinoTypes(ifaceAssembly, allTypes, toProcess);
-                                }
-
-                                // Add interface type to processing queue if not already added
-                                if (allTypes.Add(ifaceType))
-                                {
-                                    toProcess.Push(ifaceType);
-                                }
-                            }
-                        }
-                    }
-
-                    // explore members of nino types
-                    if (currentType.IsNinoType())
-                    {
-                        var members = currentType.GetMembers();
-                        foreach (var member in members)
-                        {
-                            if (member is IPropertySymbol prop)
-                            {
-                                var propType = prop.Type.GetNormalizedTypeSymbol().GetPureType();
-                                if (allTypes.Add(propType))
-                                    toProcess.Push(propType);
-                            }
-                            else if (member is IFieldSymbol field)
-                            {
-                                var fieldType = field.Type.GetNormalizedTypeSymbol().GetPureType();
-                                if (allTypes.Add(fieldType))
-                                    toProcess.Push(fieldType);
-                            }
-                        }
-                    }
-                }
-
-                // parametrized nino types + concrete nino types
-                HashSet<ITypeSymbol> ninoTypeSymbols = new(TupleSanitizedEqualityComparer.Default);
-                // all recognizable potential types that might be serialized/deserialized
-                HashSet<ITypeSymbol> potentialTypeSymbols = new(TupleSanitizedEqualityComparer.Default);
-
-                // separate nino types and potential types
-                foreach (var type in allTypes)
-                {
-                    if (type.IsNinoType())
-                        ninoTypeSymbols.Add(type);
-                    else
-                        potentialTypeSymbols.Add(type);
-                }
-
-                NinoGraph graph;
-                HashSet<NinoType> ninoTypes;
                 try
                 {
-                    CSharpParser parser = new(ninoTypeSymbols);
-                    (graph, ninoTypes) = parser.Parse(compilation);
+                    // Add debug output showing graph structure
+                    spc.AddSource($"{metadata.AssemblyNamespace}.Graph.g.cs",
+                        $"/*\n{graph}\n*/");
 
-                    // Generate debug info with stability check
-                    var curNamespace = compilation.AssemblyName?.GetNamespace() ?? "DefaultNamespace";
-                    spc.AddSource($"{curNamespace}.Graph.g.cs", $"/*\n{graph}\n*/");
-                    spc.AddSource($"{curNamespace}.Types.g.cs",
-                        $"/*\n{string.Join("\n", ninoTypes.Where(t => t.Members.Count > 0))}\n*/");
+                    var ninoTypes = graph.TypeMap.Values.ToList();
+                    spc.AddSource($"{metadata.AssemblyNamespace}.Types.g.cs",
+                        $"/*\n{string.Join("\n", ninoTypes.Where(t => t.Members.Length > 0))}\n*/");
+
+                    // Execute all generators with pure DTOs
+                    ExecuteGenerators(spc, metadata, graph);
                 }
-                catch (Exception e)
+                catch (Exception ex)
                 {
-                    // Log error but don't completely fail generation
+                    // Report but don't fail completely
                     spc.ReportDiagnostic(Diagnostic.Create(
-                        new DiagnosticDescriptor("NINO000", "Nino Generator Parse Error",
-                            $"Parser failed, falling back to minimal generation: {e.Message}",
+                        new DiagnosticDescriptor("NINO998",
+                            "Nino Generator Warning",
+                            $"Generator encountered issue but continuing: {ex.Message}",
                             "Nino.Generator",
-                            DiagnosticSeverity.Warning, true), Location.None));
-
-                    spc.AddSource("NinoGraph.Error.g.cs",
-                        $"/*\nParser failed: {e.Message}\nStack Trace:\n{e.StackTrace}\n*/");
-
-                    // Create minimal fallback to prevent complete failure
-                    graph = new NinoGraph(compilation, new HashSet<NinoType>());
-                    ninoTypes = new HashSet<NinoType>();
+                            DiagnosticSeverity.Warning,
+                            true,
+                            description: $"Stack trace: {ex.StackTrace}"),
+                        Location.None));
                 }
-
-                // for each nino type, add its members' types to potential types
-                foreach (var ninoType in ninoTypes)
-                {
-                    // add members' types to potential types
-                    foreach (var member in ninoType.Members)
-                    {
-                        potentialTypeSymbols.Add(member.Type);
-                    }
-                }
-
-                var distinctNinoTypes = ninoTypes.Distinct().ToList();
-                HashSet<ITypeSymbol> generatedTypes = new(TupleSanitizedEqualityComparer.Default);
-
-                // Execute all generators
-                ExecuteGenerator(
-                    new NinoBuiltInTypesGenerator(graph, potentialTypeSymbols, generatedTypes, compilation, isUnityAssembly), spc);
-                ExecuteGenerator(new TypeConstGenerator(compilation, graph, distinctNinoTypes), spc);
-                ExecuteGenerator(new UnsafeAccessorGenerator(compilation, graph, distinctNinoTypes), spc);
-                ExecuteGenerator(new PartialClassGenerator(compilation, graph, distinctNinoTypes), spc);
-                ExecuteGenerator(new SerializerGenerator(compilation, graph, distinctNinoTypes, generatedTypes, isUnityAssembly), spc);
-                ExecuteGenerator(new DeserializerGenerator(compilation, graph, distinctNinoTypes, generatedTypes, isUnityAssembly), spc);
-            }
-            catch (Exception e)
-            {
-                // Report but don't fail completely - let build succeed
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    new DiagnosticDescriptor("NINO998", "Nino Generator Warning",
-                        $"Generator encountered issue but continuing: {e.Message}",
-                        "Nino.Generator",
-                        DiagnosticSeverity.Warning, true), Location.None));
-            }
-        });
+            });
     }
 
-    private static void ExecuteGenerator<T>(T generator, SourceProductionContext spc) where T : NinoGenerator
+    /// <summary>
+    /// Execute all code generators using only pure DTOs.
+    /// NO ITypeSymbol or Compilation references allowed here!
+    /// </summary>
+    private static void ExecuteGenerators(
+        SourceProductionContext spc,
+        CompilationMetadata metadata,
+        NinoGraph graph)
     {
-        var generatorName = typeof(T).Name;
+        // Build type info cache for quick lookups
+        var typeInfoCache = new Dictionary<int, TypeInfoDto>();
+        foreach (var ninoType in graph.TypeMap.Values)
+        {
+            typeInfoCache[ninoType.TypeInfo.TypeId] = ninoType.TypeInfo;
+        }
+
+        var ninoTypes = graph.TypeMap.Values.ToList();
+        var assemblyNamespace = metadata.AssemblyNamespace;
+        var isUnityAssembly = metadata.IsUnityAssembly;
+
         try
         {
-            generator.Execute(spc);
+            // Phase 5: All generators now use DTO-based API
+            var ninoTypesArray = new EquatableArray<NinoType>(ninoTypes.ToArray());
+
+            // Build generated type IDs for built-in types
+            // Extract all TypeIds from ninoTypes and their referenced types
+            var generatedBuiltInTypeIds = new HashSet<int>();
+            foreach (var ninoType in ninoTypes)
+            {
+                // Collect TypeIds from all members
+                foreach (var member in ninoType.Members)
+                {
+                    if (typeInfoCache.ContainsKey(member.Type.TypeId))
+                    {
+                        generatedBuiltInTypeIds.Add(member.Type.TypeId);
+                    }
+                }
+            }
+
+            // 1. Type Constants Generator
+            ExecuteGeneratorSafe(
+                spc,
+                "TypeConstGenerator",
+                () =>
+                {
+                    var gen = new TypeConstGenerator(
+                        typeInfoCache,
+                        assemblyNamespace,
+                        graph,
+                        ninoTypesArray);
+                    gen.Execute(spc);
+                });
+
+            // 2. Unsafe Accessor Generator
+            ExecuteGeneratorSafe(
+                spc,
+                "UnsafeAccessorGenerator",
+                () =>
+                {
+                    var gen = new UnsafeAccessorGenerator(
+                        typeInfoCache,
+                        assemblyNamespace,
+                        graph,
+                        ninoTypesArray);
+                    gen.Execute(spc);
+                });
+
+            // 3. Partial Class Generator
+            ExecuteGeneratorSafe(
+                spc,
+                "PartialClassGenerator",
+                () =>
+                {
+                    var gen = new PartialClassGenerator(
+                        typeInfoCache,
+                        assemblyNamespace,
+                        graph,
+                        ninoTypesArray);
+                    gen.Execute(spc);
+                });
+
+            // 4. Serializer Generator
+            ExecuteGeneratorSafe(
+                spc,
+                "SerializerGenerator",
+                () =>
+                {
+                    var gen = new SerializerGenerator(
+                        typeInfoCache,
+                        assemblyNamespace,
+                        graph,
+                        ninoTypesArray,
+                        generatedBuiltInTypeIds,
+                        isUnityAssembly);
+                    gen.Execute(spc);
+                });
+
+            // 5. Deserializer Generator
+            ExecuteGeneratorSafe(
+                spc,
+                "DeserializerGenerator",
+                () =>
+                {
+                    var gen = new DeserializerGenerator(
+                        typeInfoCache,
+                        assemblyNamespace,
+                        graph,
+                        ninoTypesArray,
+                        generatedBuiltInTypeIds,
+                        isUnityAssembly);
+                    gen.Execute(spc);
+                });
+
+            // 6. Built-In Types Generator
+            ExecuteGeneratorSafe(
+                spc,
+                "NinoBuiltInTypesGenerator",
+                () =>
+                {
+                    // Potential types are all types in the cache
+                    var potentialTypeIds = new HashSet<int>(typeInfoCache.Keys);
+                    var selectedTypeIds = new HashSet<int>();
+
+                    var gen = new NinoBuiltInTypesGenerator(
+                        typeInfoCache,
+                        assemblyNamespace,
+                        graph,
+                        potentialTypeIds,
+                        selectedTypeIds,
+                        isUnityAssembly);
+                    gen.Execute(spc);
+                });
+        }
+        catch (Exception ex)
+        {
+            spc.ReportDiagnostic(Diagnostic.Create(
+                new DiagnosticDescriptor("NINO999",
+                    "Code Generation Failed",
+                    $"Failed to execute generators: {ex.Message}",
+                    "Nino.Generator",
+                    DiagnosticSeverity.Error,
+                    true,
+                    description: $"Stack trace: {ex.StackTrace}"),
+                Location.None));
+        }
+    }
+
+    /// <summary>
+    /// Execute a single generator with error handling.
+    /// </summary>
+    private static void ExecuteGeneratorSafe(
+        SourceProductionContext spc,
+        string generatorName,
+        Action executeAction)
+    {
+        try
+        {
+            executeAction();
         }
         catch (Exception ex)
         {
             // Report specific generator failure with details
             spc.ReportDiagnostic(Diagnostic.Create(
-                new DiagnosticDescriptor("NINO999",
+                new DiagnosticDescriptor("NINO997",
                     $"{generatorName} Error",
                     $"{generatorName} failed: {ex.GetType().Name} - {ex.Message}",
                     "Nino.Generator",
@@ -319,7 +454,7 @@ public class GlobalGenerator : IIncrementalGenerator
                     description: $"Stack trace: {ex.StackTrace}"),
                 Location.None));
 
-            // Also add a comment in generated code for debugging
+            // Add comment in generated code for debugging
             spc.AddSource($"{generatorName}.Error.g.cs",
                 $@"/*
 {generatorName} failed to generate code.
@@ -328,7 +463,8 @@ Error: {ex.GetType().Name}: {ex.Message}
 Stack Trace:
 {ex.StackTrace}
 
-This error has been logged as a warning and other generators will continue.
+This error has been logged as a warning.
+Generators will be updated in Phase 5 to use new DTO-based API.
 */");
         }
     }

@@ -32,38 +32,39 @@ using Nino.Generator.Template;
 namespace Nino.Generator.BuiltInType;
 
 public class ArrayGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    HashSet<ITypeSymbol> potentialTypes,
-    HashSet<ITypeSymbol> selectedTypes,
-    Compilation compilation) : NinoBuiltInTypeGenerator(ninoGraph, potentialTypes, selectedTypes, compilation)
+    HashSet<int> potentialTypeIds,
+    HashSet<int> selectedTypeIds,
+    bool isUnityAssembly = false) : NinoBuiltInTypeGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly)
 {
     protected override string OutputFileName => "NinoArrayTypeGenerator";
 
-    public override bool Filter(ITypeSymbol typeSymbol)
+    public override bool Filter(TypeInfoDto typeInfo)
     {
-        if (typeSymbol is not IArrayTypeSymbol arraySymbol) return false;
-        var elementType = arraySymbol.ElementType;
-        return elementType.GetKind(NinoGraph, GeneratedTypes) != NinoTypeHelper.NinoTypeKind.Invalid;
+        if (typeInfo.ArrayRank == 0) return false;
+        if (!typeInfo.ArrayElementType.HasValue) return false;
+        var elementType = typeInfo.ArrayElementType.Value;
+        return TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) != NinoTypeKind.Invalid;
     }
 
-    protected override void GenerateSerializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateSerializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var arraySymbol = (IArrayTypeSymbol)typeSymbol;
-        var elementType = arraySymbol.ElementType;
-        elementType.GetDisplayString();
-        var rank = arraySymbol.Rank;
-        var typeName = typeSymbol.GetDisplayString();
+        var elementType = typeInfo.ArrayElementType!.Value;
+        var rank = typeInfo.ArrayRank;
+        var typeName = typeInfo.DisplayName;
 
         // Check if we can use the fast unmanaged write path
         // Element must be unmanaged AND cannot be polymorphic
         // Fast path only works for 1D arrays
-        bool canUseFastPath = rank == 1 && elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool canUseFastPath = rank == 1 && TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         // Check if we can use monomorphic fast path (sealed/struct NinoType)
         // This allows us to cache the serializer delegate once instead of lookup per element
         bool canUseMonomorphicPath = rank == 1 &&
-                                      elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.NinoType &&
-                                      elementType.IsSealedOrStruct();
+                                      TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.NinoType &&
+                                      TypeInfoDtoExtensions.IsSealedOrStruct(elementType);
 
         WriteAggressiveInlining(writer);
         writer.Append("public static void Serialize(this ");
@@ -105,20 +106,20 @@ public class ArrayGenerator(
             writer.AppendLine();
             writer.AppendLine("    do");
             writer.AppendLine("    {");
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("        var pos = writer.Advance(4);"); });
 
             if (canUseMonomorphicPath)
             {
                 // Monomorphic fast path: direct call to avoid delegate allocation
-                writer.AppendLine($"        CachedSerializer<{elementType.GetDisplayString()}>.SerializePolymorphic(cur, ref writer);");
+                writer.AppendLine($"        CachedSerializer<{elementType.DisplayName}>.SerializePolymorphic(cur, ref writer);");
             }
             else
             {
                 writer.Append("        ");
                 writer.AppendLine(GetSerializeString(elementType, "cur"));
             }
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("        writer.PutLength(pos);"); });
             writer.AppendLine("        cur = ref System.Runtime.CompilerServices.Unsafe.Add(ref cur, 1);");
             writer.AppendLine("    }");
@@ -174,11 +175,11 @@ public class ArrayGenerator(
             var indices = string.Join(", ", Enumerable.Range(0, rank).Select(i => $"i{i}"));
 
             // Only use WEAK_VERSION_TOLERANCE for non-unmanaged types
-            bool isUnmanaged = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+            bool isUnmanaged = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine($"{innerIndent}var pos = writer.Advance(4);"); });
             }
 
@@ -187,7 +188,7 @@ public class ArrayGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine($"{innerIndent}writer.PutLength(pos);"); });
             }
 
@@ -201,24 +202,23 @@ public class ArrayGenerator(
         writer.AppendLine("}");
     }
 
-    protected override void GenerateDeserializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateDeserializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var arraySymbol = (IArrayTypeSymbol)typeSymbol;
-        var elementType = arraySymbol.ElementType;
-        var elemType = elementType.GetDisplayString();
-        var rank = arraySymbol.Rank;
-        var typeName = typeSymbol.GetDisplayString();
+        var elementType = typeInfo.ArrayElementType!.Value;
+        var elemType = elementType.DisplayName;
+        var rank = typeInfo.ArrayRank;
+        var typeName = typeInfo.DisplayName;
 
         // Check if we can use the fast unmanaged read path
         // Element must be unmanaged AND cannot be polymorphic
         // Fast path only works for 1D arrays
-        bool canUseFastPath = rank == 1 && elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool canUseFastPath = rank == 1 && TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         // Check if we can use monomorphic fast path (sealed/struct NinoType)
         // This allows us to cache the deserializer delegate once instead of lookup per element
         bool canUseMonomorphicPath = rank == 1 &&
-                                      elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.NinoType &&
-                                      elementType.IsSealedOrStruct();
+                                      TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.NinoType &&
+                                      TypeInfoDtoExtensions.IsSealedOrStruct(elementType);
 
         // Out overload
         WriteAggressiveInlining(writer);
@@ -242,7 +242,7 @@ public class ArrayGenerator(
             writer.AppendLine("    }");
             writer.AppendLine();
             // Optimized array deserialization - reduce reader slicing overhead
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("    Reader eleReader;"); });
             writer.AppendLine();
             writer.Append("    value = new ");
@@ -256,20 +256,20 @@ public class ArrayGenerator(
             if (canUseMonomorphicPath)
             {
                 // Monomorphic fast path: direct call to avoid delegate allocation
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
-                        w.AppendLine($"        CachedDeserializer<{elementType.GetDisplayString()}>.Deserialize(out span[i], ref eleReader);");
+                        w.AppendLine($"        CachedDeserializer<{elementType.DisplayName}>.Deserialize(out span[i], ref eleReader);");
                     },
                     w =>
                     {
-                        w.AppendLine($"        CachedDeserializer<{elementType.GetDisplayString()}>.Deserialize(out span[i], ref reader);");
+                        w.AppendLine($"        CachedDeserializer<{elementType.DisplayName}>.Deserialize(out span[i], ref reader);");
                     });
             }
             else
             {
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
@@ -314,11 +314,11 @@ public class ArrayGenerator(
             writer.AppendLine();
 
             // Only use WEAK_VERSION_TOLERANCE reader for non-unmanaged types
-            bool isUnmanaged = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+            bool isUnmanaged = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("    Reader eleReader;"); });
             }
             writer.AppendLine();
@@ -344,7 +344,7 @@ public class ArrayGenerator(
 
             if (!isUnmanaged)
             {
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine($"{innerIndent}eleReader = reader.Slice();");
@@ -397,7 +397,7 @@ public class ArrayGenerator(
             writer.AppendLine("    }");
             writer.AppendLine();
 
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("    Reader eleReader;"); });
             writer.AppendLine();
 
@@ -421,20 +421,20 @@ public class ArrayGenerator(
             if (canUseMonomorphicPath)
             {
                 // Monomorphic fast path: direct call to avoid delegate allocation
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
-                        w.AppendLine($"        CachedDeserializer<{elementType.GetDisplayString()}>.DeserializeRef(ref span[i], ref eleReader);");
+                        w.AppendLine($"        CachedDeserializer<{elementType.DisplayName}>.DeserializeRef(ref span[i], ref eleReader);");
                     },
                     w =>
                     {
-                        w.AppendLine($"        CachedDeserializer<{elementType.GetDisplayString()}>.DeserializeRef(ref span[i], ref reader);");
+                        w.AppendLine($"        CachedDeserializer<{elementType.DisplayName}>.DeserializeRef(ref span[i], ref reader);");
                     });
             }
             else
             {
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
@@ -478,11 +478,11 @@ public class ArrayGenerator(
             writer.AppendLine();
 
             // Only use WEAK_VERSION_TOLERANCE reader for non-unmanaged types
-            bool isUnmanagedRef = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+            bool isUnmanagedRef = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
             if (!isUnmanagedRef)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("    Reader eleReader;"); });
             }
             writer.AppendLine();
@@ -519,7 +519,7 @@ public class ArrayGenerator(
 
             if (!isUnmanagedRef)
             {
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine($"{innerIndent}eleReader = reader.Slice();");

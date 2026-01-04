@@ -7,32 +7,34 @@ using Nino.Generator.Template;
 
 namespace Nino.Generator.Common;
 
-public class UnsafeAccessorGenerator(Compilation compilation, NinoGraph ninoGraph, List<NinoType> ninoTypes)
-    : NinoCommonGenerator(compilation, ninoGraph, ninoTypes)
+public class UnsafeAccessorGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
+    NinoGraph ninoGraph,
+    EquatableArray<NinoType> ninoTypes)
+    : NinoCommonGenerator(typeInfoCache, assemblyNamespace, ninoGraph, ninoTypes)
 {
     protected override void Generate(SourceProductionContext spc)
     {
-        var compilation = Compilation;
-
         var sb = new StringBuilder();
-        var generatedTypes = new HashSet<NinoType>();
+        var generatedTypes = new HashSet<int>();
         var generatedMembers = new HashSet<(string, string)>();
 
         foreach (var ninoType in NinoTypes)
         {
             try
             {
-                bool isPolymorphicType = ninoType.IsPolymorphic();
+                bool isPolymorphicType = ninoType.IsPolymorphic;
 
                 // check if struct is unmanaged
-                if (ninoType.TypeSymbol.IsUnmanagedType && !isPolymorphicType)
+                if (ninoType.TypeInfo.IsUnmanagedType && !isPolymorphicType)
                 {
                     continue;
                 }
 
                 void WriteMembers(NinoType type)
                 {
-                    if (!generatedTypes.Add(type))
+                    if (!generatedTypes.Add(type.TypeInfo.TypeId))
                     {
                         return;
                     }
@@ -44,23 +46,15 @@ public class UnsafeAccessorGenerator(Compilation compilation, NinoGraph ninoGrap
                             continue;
                         }
 
-                        // Use the member's actual containing type instead of traversing from the current type
-                        // This fixes cross-assembly type resolution issues
-                        var declaringType = member.MemberSymbol.ContainingType;
-                        
-                        if (declaringType == null)
-                        {
-                            continue;
-                        }
-
-                        string typeName = declaringType.GetDisplayString();
+                        // Use the type's TypeInfo as the containing type
+                        string typeName = type.TypeInfo.DisplayName;
 
                         if (!generatedMembers.Add((typeName, member.Name)))
                         {
                             continue;
                         }
 
-                        if (declaringType.IsValueType)
+                        if (type.TypeInfo.IsValueType)
                         {
                             typeName = $"ref {typeName}";
                         }
@@ -73,19 +67,19 @@ public class UnsafeAccessorGenerator(Compilation compilation, NinoGraph ninoGrap
                             sb.AppendLine(
                                 $"        [UnsafeAccessor(UnsafeAccessorKind.Method, Name = \"get_{name}\")]");
                             sb.AppendLine(
-                                $"        internal extern static {declaredType.GetDisplayString()} __get__{name}__({typeName} @this);");
+                                $"        internal extern static {declaredType.DisplayName} __get__{name}__({typeName} @this);");
 
                             sb.AppendLine(
                                 $"        [UnsafeAccessor(UnsafeAccessorKind.Method, Name = \"set_{name}\")]");
                             sb.AppendLine(
-                                $"        internal extern static void __set__{name}__({typeName} @this, {declaredType.GetDisplayString()} value);");
+                                $"        internal extern static void __set__{name}__({typeName} @this, {declaredType.DisplayName} value);");
                         }
                         else
                         {
                             sb.AppendLine(
                                 $"        [UnsafeAccessor(UnsafeAccessorKind.Field, Name = \"{name}\")]");
                             sb.AppendLine(
-                                $"        internal extern static ref {declaredType.GetDisplayString()} __{name}__({typeName} @this);");
+                                $"        internal extern static ref {declaredType.DisplayName} __{name}__({typeName} @this);");
                         }
                     }
                 }
@@ -93,7 +87,8 @@ public class UnsafeAccessorGenerator(Compilation compilation, NinoGraph ninoGrap
                 if (NinoGraph.SubTypes.TryGetValue(ninoType, out var lst))
                 {
                     //sort lst by how deep the inheritance is (i.e. how many levels of inheritance), the deepest first
-                    lst.Sort((a, b) =>
+                    var sortedList = new List<NinoType>(lst);
+                    sortedList.Sort((a, b) =>
                     {
                         // Use TryGetValue to avoid KeyNotFoundException during concurrent execution
                         int aCount = NinoGraph.BaseTypes.TryGetValue(a, out var aBaseTypes) ? aBaseTypes.Count : 0;
@@ -101,12 +96,12 @@ public class UnsafeAccessorGenerator(Compilation compilation, NinoGraph ninoGrap
                         return bCount.CompareTo(aCount);
                     });
 
-                    foreach (var subType in lst)
+                    foreach (var subType in sortedList)
                     {
-                        var subTypeSymbol = subType.TypeSymbol;
-                        if (subTypeSymbol.IsInstanceType())
+                        var subTypeInfo = subType.TypeInfo;
+                        if (TypeInfoDtoExtensions.IsInstanceType(subTypeInfo))
                         {
-                            if (subTypeSymbol.IsUnmanagedType)
+                            if (subTypeInfo.IsUnmanagedType)
                             {
                                 continue;
                             }
@@ -116,9 +111,9 @@ public class UnsafeAccessorGenerator(Compilation compilation, NinoGraph ninoGrap
                     }
                 }
 
-                if (ninoType.TypeSymbol.IsInstanceType())
+                if (TypeInfoDtoExtensions.IsInstanceType(ninoType.TypeInfo))
                 {
-                    if (ninoType.TypeSymbol.IsUnmanagedType)
+                    if (ninoType.TypeInfo.IsUnmanagedType)
                     {
                         continue;
                     }
@@ -128,7 +123,7 @@ public class UnsafeAccessorGenerator(Compilation compilation, NinoGraph ninoGrap
             }
             catch (Exception e)
             {
-                sb.AppendLine($"/* Error: {e.Message} for type {ninoType.TypeSymbol.GetTypeFullName()}");
+                sb.AppendLine($"/* Error: {e.Message} for type {ninoType.TypeInfo.FullyQualifiedName}");
                 //add stacktrace
                 foreach (var line in (e.StackTrace ?? "").Split('\n'))
                 {
@@ -140,7 +135,7 @@ public class UnsafeAccessorGenerator(Compilation compilation, NinoGraph ninoGrap
             }
         }
 
-        var curNamespace = compilation.AssemblyName!.GetNamespace();
+        var curNamespace = AssemblyNamespace;
 
         // generate code
         var code = $$"""

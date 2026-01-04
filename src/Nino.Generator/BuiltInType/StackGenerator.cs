@@ -31,41 +31,43 @@ using Nino.Generator.Template;
 namespace Nino.Generator.BuiltInType;
 
 public class StackGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    HashSet<ITypeSymbol> potentialTypes,
-    HashSet<ITypeSymbol> selectedTypes,
-    Compilation compilation) : NinoBuiltInTypeGenerator(ninoGraph, potentialTypes, selectedTypes, compilation)
+    HashSet<int> potentialTypeIds,
+    HashSet<int> selectedTypeIds,
+    bool isUnityAssembly = false) : NinoBuiltInTypeGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly)
 {
     protected override string OutputFileName => "NinoStackTypeGenerator";
 
-    public override bool Filter(ITypeSymbol typeSymbol)
+    public override bool Filter(TypeInfoDto typeInfo)
     {
-        if (typeSymbol is not INamedTypeSymbol namedType) return false;
+        if (!typeInfo.IsGenericType) return false;
+        if (typeInfo.TypeArguments.Length != 1) return false;
 
         // Accept Stack<T> and ConcurrentStack<T>
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         if (originalDef != "System.Collections.Generic.Stack<T>" &&
             originalDef != "System.Collections.Concurrent.ConcurrentStack<T>")
             return false;
 
-        var elementType = namedType.TypeArguments[0];
+        var elementType = typeInfo.TypeArguments[0];
 
         // Element type must be valid
-        if (elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid)
+        if (TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid)
             return false;
 
         return true;
     }
 
-    protected override void GenerateSerializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateSerializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var elementType = namedType.TypeArguments[0];
+        var elementType = typeInfo.TypeArguments[0];
 
-        var typeName = typeSymbol.GetDisplayString();
+        var typeName = typeInfo.DisplayName;
 
         // Check if element is unmanaged (no WeakVersionTolerance needed)
-        bool isUnmanaged = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool isUnmanaged = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         WriteAggressiveInlining(writer);
         writer.Append("public static void Serialize(this ");
@@ -89,12 +91,12 @@ public class StackGenerator(
         writer.AppendLine("    }");
         writer.AppendLine();
 
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         bool isStack = originalDef == "System.Collections.Generic.Stack<T>";
 
         if (isStack)
         {
-            var stackViewTypeName = $"Nino.Core.Internal.StackView<{elementType.GetDisplayString()}>";
+            var stackViewTypeName = $"Nino.Core.Internal.StackView<{elementType.DisplayName}>";
             writer.Append("    ref var stack = ref System.Runtime.CompilerServices.Unsafe.As<");
             writer.Append(typeName);
             writer.Append(", ");
@@ -120,7 +122,7 @@ public class StackGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        var pos = writer.Advance(4);"); });
             }
 
@@ -129,7 +131,7 @@ public class StackGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        writer.PutLength(pos);"); });
             }
 
@@ -145,7 +147,7 @@ public class StackGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        var pos = writer.Advance(4);"); });
             }
 
@@ -154,7 +156,7 @@ public class StackGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        writer.PutLength(pos);"); });
             }
 
@@ -164,15 +166,14 @@ public class StackGenerator(
         writer.AppendLine("}");
     }
 
-    protected override void GenerateDeserializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateDeserializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var elementType = namedType.TypeArguments[0];
-        var elemType = elementType.GetDisplayString();
-        var typeName = typeSymbol.GetDisplayString();
+        var elementType = typeInfo.TypeArguments[0];
+        var elemType = elementType.DisplayName;
+        var typeName = typeInfo.DisplayName;
 
         // Check if element is unmanaged (no WeakVersionTolerance needed)
-        bool isUnmanaged = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool isUnmanaged = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         // Out overload
         WriteAggressiveInlining(writer);
@@ -192,7 +193,7 @@ public class StackGenerator(
 
         if (!isUnmanaged)
         {
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("    Reader eleReader;"); });
             writer.AppendLine();
         }
@@ -213,7 +214,7 @@ public class StackGenerator(
         }
         else
         {
-            IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w =>
                 {
                     w.AppendLine("            eleReader = reader.Slice();");
@@ -231,7 +232,7 @@ public class StackGenerator(
         writer.AppendLine();
 
         // ConcurrentStack doesn't support capacity parameter, only Stack does
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         bool isConcurrentStack = originalDef == "System.Collections.Concurrent.ConcurrentStack<T>";
 
         writer.Append("        value = new ");
@@ -270,7 +271,7 @@ public class StackGenerator(
 
         if (!isUnmanaged)
         {
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("    Reader eleReader;"); });
             writer.AppendLine();
         }
@@ -291,7 +292,7 @@ public class StackGenerator(
         }
         else
         {
-            IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w =>
                 {
                     w.AppendLine("            eleReader = reader.Slice();");

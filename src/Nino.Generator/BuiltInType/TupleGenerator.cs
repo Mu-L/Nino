@@ -32,52 +32,53 @@ using Nino.Generator.Template;
 namespace Nino.Generator.BuiltInType;
 
 public class TupleGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    HashSet<ITypeSymbol> potentialTypes,
-    HashSet<ITypeSymbol> selectedTypes,
-    Compilation compilation) : NinoBuiltInTypeGenerator(ninoGraph, potentialTypes, selectedTypes, compilation)
+    HashSet<int> potentialTypeIds,
+    HashSet<int> selectedTypeIds,
+    bool isUnityAssembly = false) : NinoBuiltInTypeGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly)
 {
     protected override string OutputFileName => "NinoTupleGenerator";
 
-    public override bool Filter(ITypeSymbol typeSymbol)
+    public override bool Filter(TypeInfoDto typeInfo)
     {
-        if (typeSymbol is not INamedTypeSymbol namedType)
+        if (!typeInfo.IsGenericType)
         {
             return false;
         }
 
         // Filter empty tuples
-        if (namedType.TypeArguments.IsEmpty)
+        if (typeInfo.TypeArguments.Length == 0)
         {
             return false;
         }
 
         // Ensure all type arguments are valid
-        foreach (var typeArg in namedType.TypeArguments)
+        foreach (var typeArg in typeInfo.TypeArguments)
         {
-            if (typeArg.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid)
+            if (TypeInfoDtoExtensions.GetKind(typeArg, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid)
             {
                 return false;
             }
         }
 
-        var name = typeSymbol.Name;
+        var name = typeInfo.Name;
         return name == "ValueTuple" || name == "Tuple";
     }
 
-    protected override void GenerateSerializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateSerializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var types = namedType.TypeArguments.ToArray();
+        var types = typeInfo.TypeArguments;
 
         // Check if we can use the fast unmanaged write
         // All items must be unmanaged AND none can be polymorphic
-        bool canUseFastPath = typeSymbol.IsUnmanagedType;
+        bool canUseFastPath = typeInfo.IsUnmanagedType;
         if (canUseFastPath)
         {
             foreach (var itemType in types)
             {
-                if (itemType.GetKind(NinoGraph, GeneratedTypes) != NinoTypeHelper.NinoTypeKind.Unmanaged)
+                if (TypeInfoDtoExtensions.GetKind(itemType, NinoGraph, GeneratedTypeIds) != NinoTypeKind.Unmanaged)
                 {
                     canUseFastPath = false;
                     break;
@@ -87,7 +88,7 @@ public class TupleGenerator(
 
         WriteAggressiveInlining(writer);
         writer.Append("public static void Serialize(this ");
-        writer.Append(typeSymbol.GetDisplayString());
+        writer.Append(typeInfo.DisplayName);
         writer.AppendLine(" value, ref Writer writer)");
         writer.AppendLine("{");
 
@@ -107,21 +108,20 @@ public class TupleGenerator(
         writer.AppendLine("}");
     }
 
-    protected override void GenerateDeserializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateDeserializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var types = namedType.TypeArguments.ToArray();
-        bool isValueTuple = namedType.Name == "ValueTuple";
+        var types = typeInfo.TypeArguments;
+        bool isValueTuple = typeInfo.Name == "ValueTuple";
 
         // Check if we can use the fast unmanaged read
         // All items must be unmanaged AND none can be polymorphic
-        bool canUseFastPath = typeSymbol.IsUnmanagedType &&
-                              typeSymbol.OriginalDefinition.SpecialType != SpecialType.System_Nullable_T;
+        bool canUseFastPath = typeInfo.IsUnmanagedType &&
+                              typeInfo.SpecialType != SpecialTypeDto.System_Nullable_T;
         if (canUseFastPath)
         {
             foreach (var itemType in types)
             {
-                if (itemType.GetKind(NinoGraph, GeneratedTypes) != NinoTypeHelper.NinoTypeKind.Unmanaged)
+                if (TypeInfoDtoExtensions.GetKind(itemType, NinoGraph, GeneratedTypeIds) != NinoTypeKind.Unmanaged)
                 {
                     canUseFastPath = false;
                     break;
@@ -129,7 +129,7 @@ public class TupleGenerator(
             }
         }
 
-        var typeName = typeSymbol.ToDisplayString();
+        var typeName = typeInfo.DisplayName;
 
         // Out overload
         WriteAggressiveInlining(writer);

@@ -31,41 +31,43 @@ using Nino.Generator.Template;
 namespace Nino.Generator.BuiltInType;
 
 public class HashSetGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    HashSet<ITypeSymbol> potentialTypes,
-    HashSet<ITypeSymbol> selectedTypes,
-    Compilation compilation) : NinoBuiltInTypeGenerator(ninoGraph, potentialTypes, selectedTypes, compilation)
+    HashSet<int> potentialTypeIds,
+    HashSet<int> selectedTypeIds,
+    bool isUnityAssembly = false) : NinoBuiltInTypeGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly)
 {
     protected override string OutputFileName => "NinoHashSetTypeGenerator";
 
-    public override bool Filter(ITypeSymbol typeSymbol)
+    public override bool Filter(TypeInfoDto typeInfo)
     {
-        if (typeSymbol is not INamedTypeSymbol namedType) return false;
+        if (!typeInfo.IsGenericType) return false;
+        if (typeInfo.TypeArguments.Length != 1) return false;
 
         // Accept HashSet<T> and ISet<T>
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         if (originalDef != "System.Collections.Generic.HashSet<T>" &&
             originalDef != "System.Collections.Generic.ISet<T>")
             return false;
 
-        var elementType = namedType.TypeArguments[0];
+        var elementType = typeInfo.TypeArguments[0];
 
         // Element type must be valid
-        if (elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid)
+        if (TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid)
             return false;
 
         return true;
     }
 
-    protected override void GenerateSerializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateSerializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var elementType = namedType.TypeArguments[0];
+        var elementType = typeInfo.TypeArguments[0];
 
-        var typeName = typeSymbol.GetDisplayString();
+        var typeName = typeInfo.DisplayName;
 
         // Check if element is unmanaged (no WeakVersionTolerance needed)
-        bool isUnmanaged = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool isUnmanaged = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         WriteAggressiveInlining(writer);
         writer.Append("public static void Serialize(this ");
@@ -89,12 +91,12 @@ public class HashSetGenerator(
         writer.AppendLine("    }");
         writer.AppendLine();
 
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         bool isHashSet = originalDef == "System.Collections.Generic.HashSet<T>";
 
         if (isHashSet)
         {
-            var hashSetViewTypeName = $"Nino.Core.Internal.HashSetView<{elementType.GetDisplayString()}>";
+            var hashSetViewTypeName = $"Nino.Core.Internal.HashSetView<{elementType.DisplayName}>";
             writer.Append("    ref var hashSet = ref System.Runtime.CompilerServices.Unsafe.As<");
             writer.Append(typeName);
             writer.Append(", ");
@@ -122,7 +124,7 @@ public class HashSetGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        var pos = writer.Advance(4);"); });
             }
 
@@ -131,7 +133,7 @@ public class HashSetGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        writer.PutLength(pos);"); });
             }
 
@@ -145,7 +147,7 @@ public class HashSetGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        var pos = writer.Advance(4);"); });
             }
 
@@ -154,7 +156,7 @@ public class HashSetGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        writer.PutLength(pos);"); });
             }
 
@@ -164,21 +166,20 @@ public class HashSetGenerator(
         writer.AppendLine("}");
     }
 
-    protected override void GenerateDeserializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateDeserializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var elementType = namedType.TypeArguments[0];
+        var elementType = typeInfo.TypeArguments[0];
 
         // Check if this is an interface type
-        bool isInterface = typeSymbol.TypeKind == TypeKind.Interface;
+        bool isInterface = typeInfo.Kind == TypeKindDto.Interface;
 
         // Check if element is unmanaged (no WeakVersionTolerance needed)
-        bool isUnmanaged = elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool isUnmanaged = TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         // For interfaces, use HashSet<T> as the concrete type
-        var typeName = typeSymbol.GetDisplayString();
+        var typeName = typeInfo.DisplayName;
         var concreteTypeName = isInterface
-            ? $"System.Collections.Generic.HashSet<{elementType.GetDisplayString()}>"
+            ? $"System.Collections.Generic.HashSet<{elementType.DisplayName}>"
             : typeName;
 
         // Out overload
@@ -199,7 +200,7 @@ public class HashSetGenerator(
 
         if (!isUnmanaged)
         {
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("    Reader eleReader;"); });
             writer.AppendLine();
         }
@@ -220,7 +221,7 @@ public class HashSetGenerator(
             }
             else
             {
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
@@ -254,7 +255,7 @@ public class HashSetGenerator(
             }
             else
             {
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");
@@ -302,7 +303,7 @@ public class HashSetGenerator(
 
             if (!isUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("    Reader eleReader;"); });
                 writer.AppendLine();
             }
@@ -329,7 +330,7 @@ public class HashSetGenerator(
             }
             else
             {
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");

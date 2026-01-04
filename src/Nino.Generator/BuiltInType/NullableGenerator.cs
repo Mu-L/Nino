@@ -31,31 +31,32 @@ using Nino.Generator.Template;
 namespace Nino.Generator.BuiltInType;
 
 public class NullableGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    HashSet<ITypeSymbol> potentialTypes,
-    HashSet<ITypeSymbol> selectedTypes,
-    Compilation compilation) : NinoBuiltInTypeGenerator(ninoGraph, potentialTypes, selectedTypes, compilation)
+    HashSet<int> potentialTypeIds,
+    HashSet<int> selectedTypeIds,
+    bool isUnityAssembly = false) : NinoBuiltInTypeGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly)
 {
     protected override string OutputFileName => "NinoNullableTypeGenerator";
 
-    public override bool Filter(ITypeSymbol typeSymbol)
+    public override bool Filter(TypeInfoDto typeInfo)
     {
-        if (typeSymbol is not INamedTypeSymbol namedType) return false;
-        if (!namedType.IsGenericType) return false;
-        if (namedType.TypeArguments.Length != 1) return false;
-        var elementType = namedType.TypeArguments[0];
-        if (elementType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid)
+        if (!typeInfo.IsGenericType) return false;
+        if (typeInfo.TypeArguments.Length != 1) return false;
+        var elementType = typeInfo.TypeArguments[0];
+        if (TypeInfoDtoExtensions.GetKind(elementType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid)
             return false;
-        return typeSymbol.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T;
+        return typeInfo.IsNullableValueType;
     }
 
-    protected override void GenerateSerializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateSerializer(TypeInfoDto typeInfo, Writer writer)
     {
-        ITypeSymbol elementType = ((INamedTypeSymbol)typeSymbol).TypeArguments[0];
+        TypeInfoDto elementType = typeInfo.TypeArguments[0];
 
         WriteAggressiveInlining(writer);
         writer.Append("public static void Serialize(this ");
-        writer.Append(elementType.GetDisplayString());
+        writer.Append(elementType.DisplayName);
         writer.AppendLine("? value, ref Writer writer)");
         writer.AppendLine("{");
         writer.AppendLine("    if (!value.HasValue)");
@@ -71,12 +72,12 @@ public class NullableGenerator(
         writer.AppendLine("}");
     }
 
-    protected override void GenerateDeserializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateDeserializer(TypeInfoDto typeInfo, Writer writer)
     {
-        ITypeSymbol elementType = ((INamedTypeSymbol)typeSymbol).TypeArguments[0];
+        TypeInfoDto elementType = typeInfo.TypeArguments[0];
         WriteAggressiveInlining(writer);
         writer.Append("public static void Deserialize(out ");
-        writer.Append(elementType.GetDisplayString());
+        writer.Append(elementType.DisplayName);
         writer.AppendLine("? value, ref Reader reader)");
         writer.AppendLine("{");
         EofCheck(writer);
@@ -95,7 +96,7 @@ public class NullableGenerator(
         writer.AppendLine();
         WriteAggressiveInlining(writer);
         writer.Append("public static void DeserializeRef(ref ");
-        writer.Append(elementType.GetDisplayString());
+        writer.Append(elementType.DisplayName);
         writer.AppendLine("? value, ref Reader reader) => Deserialize(out value, ref reader);");
     }
 }

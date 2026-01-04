@@ -31,19 +31,22 @@ using Nino.Generator.Template;
 namespace Nino.Generator.BuiltInType;
 
 public class DictionaryGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    HashSet<ITypeSymbol> potentialTypes,
-    HashSet<ITypeSymbol> selectedTypes,
-    Compilation compilation) : NinoBuiltInTypeGenerator(ninoGraph, potentialTypes, selectedTypes, compilation)
+    HashSet<int> potentialTypeIds,
+    HashSet<int> selectedTypeIds,
+    bool isUnityAssembly = false) : NinoBuiltInTypeGenerator(typeInfoCache, assemblyNamespace, ninoGraph, potentialTypeIds, selectedTypeIds, isUnityAssembly)
 {
     protected override string OutputFileName => "NinoDictionaryTypeGenerator";
 
-    public override bool Filter(ITypeSymbol typeSymbol)
+    public override bool Filter(TypeInfoDto typeInfo)
     {
-        if (typeSymbol is not INamedTypeSymbol namedType) return false;
+        if (!typeInfo.IsGenericType) return false;
+        if (typeInfo.TypeArguments.Length != 2) return false;
 
         // Accept Dictionary<,>, ConcurrentDictionary<,>, IDictionary<,>, SortedDictionary<,>, SortedList<,>, and ReadOnlyDictionary<,>
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         if (originalDef != "System.Collections.Generic.Dictionary<TKey, TValue>" &&
             originalDef != "System.Collections.Concurrent.ConcurrentDictionary<TKey, TValue>" &&
             originalDef != "System.Collections.Generic.IDictionary<TKey, TValue>" &&
@@ -52,28 +55,27 @@ public class DictionaryGenerator(
             originalDef != "System.Collections.ObjectModel.ReadOnlyDictionary<TKey, TValue>")
             return false;
 
-        var keyType = namedType.TypeArguments[0];
-        var valueType = namedType.TypeArguments[1];
+        var keyType = typeInfo.TypeArguments[0];
+        var valueType = typeInfo.TypeArguments[1];
 
         // Both key and value types must be valid
-        if (keyType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid ||
-            valueType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Invalid)
+        if (TypeInfoDtoExtensions.GetKind(keyType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid ||
+            TypeInfoDtoExtensions.GetKind(valueType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Invalid)
             return false;
 
         return true;
     }
 
-    protected override void GenerateSerializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateSerializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var keyType = namedType.TypeArguments[0];
-        var valueType = namedType.TypeArguments[1];
+        var keyType = typeInfo.TypeArguments[0];
+        var valueType = typeInfo.TypeArguments[1];
 
-        var typeName = typeSymbol.GetDisplayString();
+        var typeName = typeInfo.DisplayName;
 
         // Check if KVP is unmanaged (for fast path, no WeakVersionTolerance needed)
-        bool kvpIsUnmanaged = keyType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged &&
-                              valueType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        bool kvpIsUnmanaged = TypeInfoDtoExtensions.GetKind(keyType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged &&
+                              TypeInfoDtoExtensions.GetKind(valueType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         WriteAggressiveInlining(writer);
         writer.Append("public static void Serialize(this ");
@@ -97,12 +99,12 @@ public class DictionaryGenerator(
         writer.AppendLine("    }");
         writer.AppendLine();
 
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         bool isDictionary = originalDef == "System.Collections.Generic.Dictionary<TKey, TValue>";
 
         if (isDictionary)
         {
-            var dictViewTypeName = $"Nino.Core.Internal.DictionaryView<{keyType.GetDisplayString()}, {valueType.GetDisplayString()}>"; 
+            var dictViewTypeName = $"Nino.Core.Internal.DictionaryView<{keyType.DisplayName}, {valueType.DisplayName}>"; 
             writer.Append("    ref var dict = ref System.Runtime.CompilerServices.Unsafe.As<");
             writer.Append(typeName);
             writer.Append(", ");
@@ -131,18 +133,18 @@ public class DictionaryGenerator(
             if (kvpIsUnmanaged)
             {
                 writer.Append("        ref var kvp = ref System.Runtime.CompilerServices.Unsafe.As<");
-                writer.Append(keyType.GetDisplayString());
+                writer.Append(keyType.DisplayName);
                 writer.Append(", System.Collections.Generic.KeyValuePair<");
-                writer.Append(keyType.GetDisplayString());
+                writer.Append(keyType.DisplayName);
                 writer.Append(", ");
-                writer.Append(valueType.GetDisplayString());
+                writer.Append(valueType.DisplayName);
                 writer.AppendLine(">>(ref entry.key);");
                 writer.AppendLine("        writer.UnsafeWrite(kvp);");
             }
             else
             {
                 // For managed KVP, serialize Key and Value separately with WeakVersionTolerance
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        var pos = writer.Advance(4);"); });
 
                 writer.Append("        ");
@@ -150,7 +152,7 @@ public class DictionaryGenerator(
                 writer.Append("        ");
                 writer.AppendLine(GetSerializeString(valueType, "entry.value"));
 
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        writer.PutLength(pos);"); });
             }
 
@@ -169,7 +171,7 @@ public class DictionaryGenerator(
             else
             {
                 // For managed KVP, serialize Key and Value separately with WeakVersionTolerance
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        var pos = writer.Advance(4);"); });
 
                 writer.Append("        ");
@@ -177,7 +179,7 @@ public class DictionaryGenerator(
                 writer.Append("        ");
                 writer.AppendLine(GetSerializeString(valueType, "item.Value"));
 
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("        writer.PutLength(pos);"); });
             }
 
@@ -187,27 +189,26 @@ public class DictionaryGenerator(
         writer.AppendLine("}");
     }
 
-    protected override void GenerateDeserializer(ITypeSymbol typeSymbol, Writer writer)
+    protected override void GenerateDeserializer(TypeInfoDto typeInfo, Writer writer)
     {
-        var namedType = (INamedTypeSymbol)typeSymbol;
-        var keyType = namedType.TypeArguments[0];
-        var valueType = namedType.TypeArguments[1];
+        var keyType = typeInfo.TypeArguments[0];
+        var valueType = typeInfo.TypeArguments[1];
 
         // Check type
-        var originalDef = namedType.OriginalDefinition.ToDisplayString();
+        var originalDef = typeInfo.GenericOriginalDefinition;
         bool isIDictionary = originalDef == "System.Collections.Generic.IDictionary<TKey, TValue>";
         bool isReadOnlyDictionary = originalDef == "System.Collections.ObjectModel.ReadOnlyDictionary<TKey, TValue>";
 
         // For IDictionary, use Dictionary as the concrete type
-        var typeName = typeSymbol.GetDisplayString();
+        var typeName = typeInfo.DisplayName;
         var concreteTypeName = isIDictionary
-            ? $"System.Collections.Generic.Dictionary<{keyType.GetDisplayString()}, {valueType.GetDisplayString()}>"
+            ? $"System.Collections.Generic.Dictionary<{keyType.DisplayName}, {valueType.DisplayName}>"
             : typeName;
 
         // Check if KVP is unmanaged (for fast path, no WeakVersionTolerance needed)
-        var kvpTypeName = $"System.Collections.Generic.KeyValuePair<{keyType.GetDisplayString()}, {valueType.GetDisplayString()}>";
-        bool kvpIsUnmanaged = keyType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged &&
-                              valueType.GetKind(NinoGraph, GeneratedTypes) == NinoTypeHelper.NinoTypeKind.Unmanaged;
+        var kvpTypeName = $"System.Collections.Generic.KeyValuePair<{keyType.DisplayName}, {valueType.DisplayName}>";
+        bool kvpIsUnmanaged = TypeInfoDtoExtensions.GetKind(keyType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged &&
+                              TypeInfoDtoExtensions.GetKind(valueType, NinoGraph, GeneratedTypeIds) == NinoTypeKind.Unmanaged;
 
         // Out overload
         WriteAggressiveInlining(writer);
@@ -227,7 +228,7 @@ public class DictionaryGenerator(
 
         if (!kvpIsUnmanaged)
         {
-            IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w => { w.AppendLine("    Reader eleReader;"); });
             writer.AppendLine();
         }
@@ -236,9 +237,9 @@ public class DictionaryGenerator(
         {
             // ReadOnlyDictionary requires a dictionary in its constructor
             writer.Append("    var tempDict = new System.Collections.Generic.Dictionary<");
-            writer.Append(keyType.GetDisplayString());
+            writer.Append(keyType.DisplayName);
             writer.Append(", ");
-            writer.Append(valueType.GetDisplayString());
+            writer.Append(valueType.DisplayName);
             writer.AppendLine(">(length);");
             writer.AppendLine("    for (int i = 0; i < length; i++)");
             writer.AppendLine("    {");
@@ -272,7 +273,7 @@ public class DictionaryGenerator(
         else
         {
             // For managed KVP, deserialize Key and Value separately with WeakVersionTolerance
-            IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+            IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                 w =>
                 {
                     w.AppendLine("        eleReader = reader.Slice();");
@@ -338,7 +339,7 @@ public class DictionaryGenerator(
 
             if (!kvpIsUnmanaged)
             {
-                IfDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w => { w.AppendLine("    Reader eleReader;"); });
                 writer.AppendLine();
             }
@@ -370,7 +371,7 @@ public class DictionaryGenerator(
             else
             {
                 // For managed KVP, deserialize Key and Value separately with WeakVersionTolerance
-                IfElseDirective(NinoTypeHelper.WeakVersionToleranceSymbol, writer,
+                IfElseDirective(NinoConstants.WeakVersionToleranceSymbol, writer,
                     w =>
                     {
                         w.AppendLine("        eleReader = reader.Slice();");

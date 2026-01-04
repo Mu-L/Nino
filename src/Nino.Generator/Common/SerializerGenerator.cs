@@ -8,79 +8,88 @@ using Nino.Generator.Template;
 namespace Nino.Generator.Common;
 
 public partial class SerializerGenerator(
-    Compilation compilation,
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
     NinoGraph ninoGraph,
-    List<NinoType> ninoTypes,
-    HashSet<ITypeSymbol> generatedBuiltInTypes,
+    EquatableArray<NinoType> ninoTypes,
+    HashSet<int> generatedBuiltInTypeIds,
     bool isUnityAssembly)
-    : NinoCommonGenerator(compilation, ninoGraph, ninoTypes, isUnityAssembly)
+    : NinoCommonGenerator(typeInfoCache, assemblyNamespace, ninoGraph, ninoTypes, isUnityAssembly)
 {
-    protected readonly HashSet<ITypeSymbol> GeneratedBuiltInTypes = generatedBuiltInTypes;
+    protected readonly HashSet<int> GeneratedBuiltInTypeIds = generatedBuiltInTypeIds;
 
-    private void GenerateGenericRegister(StringBuilder sb, string name, HashSet<ITypeSymbol> generatedTypes,
-        HashSet<ITypeSymbol> registeredTypes)
+    private void GenerateGenericRegister(StringBuilder sb, string name, HashSet<int> generatedTypeIds,
+        HashSet<int> registeredTypeIds)
     {
         sb.AppendLine($$"""
                                 private static void Register{{name}}Serializers()
                                 {
                         """);
         // Order types: top types first, then types with base types, then others
-        var orderedTypes = generatedTypes
-            .Where(t => !t.IsRefStruct())
-            .ToList(); // Convert to list first to avoid ordering issues
+        var orderedTypeIds = generatedTypeIds
+            .Where(typeId => TypeInfoCache.TryGetValue(typeId, out var typeInfo) && !typeInfo.IsRefLikeType)
+            .ToList();
 
         // Manual ordering instead of OrderBy to avoid IComparable issues
-        var topTypes = orderedTypes.Where(t =>
-            NinoGraph.TopTypes.Any(topType => SymbolEqualityComparer.Default.Equals(topType.TypeSymbol, t))).ToList();
-        var typeMapTypes = orderedTypes.Where(t =>
-            NinoGraph.TypeMap.ContainsKey(t.GetDisplayString()) &&
-            !NinoGraph.TopTypes.Any(topType => SymbolEqualityComparer.Default.Equals(topType.TypeSymbol, t))).ToList();
-        var otherTypes = orderedTypes.Where(t =>
-            !NinoGraph.TypeMap.ContainsKey(t.GetDisplayString()) &&
-            !NinoGraph.TopTypes.Any(topType => SymbolEqualityComparer.Default.Equals(topType.TypeSymbol, t))).ToList();
-
-        foreach (var type in topTypes.Concat(typeMapTypes).Concat(otherTypes))
+        var topTypeIds = orderedTypeIds.Where(typeId =>
+            NinoGraph.TopTypes.Any(topType => topType.TypeInfo.TypeId == typeId)).ToList();
+        var typeMapTypeIds = orderedTypeIds.Where(typeId =>
         {
-            var typeFullName = type.GetDisplayString();
-            if (NinoGraph.TypeMap.TryGetValue(type.GetDisplayString(), out var ninoType))
+            if (!TypeInfoCache.TryGetValue(typeId, out var typeInfo)) return false;
+            return NinoGraph.TypeMap.ContainsKey(typeInfo.DisplayName) &&
+                   !NinoGraph.TopTypes.Any(topType => topType.TypeInfo.TypeId == typeId);
+        }).ToList();
+        var otherTypeIds = orderedTypeIds.Where(typeId =>
+        {
+            if (!TypeInfoCache.TryGetValue(typeId, out var typeInfo)) return false;
+            return !NinoGraph.TypeMap.ContainsKey(typeInfo.DisplayName) &&
+                   !NinoGraph.TopTypes.Any(topType => topType.TypeInfo.TypeId == typeId);
+        }).ToList();
+
+        foreach (var typeId in topTypeIds.Concat(typeMapTypeIds).Concat(otherTypeIds))
+        {
+            if (!TypeInfoCache.TryGetValue(typeId, out var typeInfo)) continue;
+            var typeFullName = typeInfo.DisplayName;
+
+            if (NinoGraph.TypeMap.TryGetValue(typeInfo.DisplayName, out var ninoType))
             {
                 // Use TryGetValue to avoid KeyNotFoundException during concurrent execution
-                if (!NinoGraph.BaseTypes.TryGetValue(ninoType, out var baseTypes))
-                {
-                    baseTypes = new List<NinoType>();
-                }
+                var baseTypes = NinoGraph.BaseTypes.TryGetValue(ninoType, out var bases)
+                    ? bases
+                    : new List<NinoType>();
+
                 string prefix;
 
                 foreach (var baseType in baseTypes)
                 {
-                    if (registeredTypes.Add(baseType.TypeSymbol))
+                    if (registeredTypeIds.Add(baseType.TypeInfo.TypeId))
                     {
-                        var baseTypeName = baseType.TypeSymbol.GetDisplayString();
+                        var baseTypeName = baseType.TypeInfo.DisplayName;
                         prefix = !string.IsNullOrEmpty(baseType.CustomSerializer)
                             ? $"{baseType.CustomSerializer}."
                             : "";
 
-                        var method = baseType.TypeSymbol.IsInstanceType() ? $"{prefix}SerializeImpl" : "null";
+                        var method = TypeInfoDtoExtensions.IsInstanceType(baseType.TypeInfo) ? $"{prefix}SerializeImpl" : "null";
                         sb.AppendLine($$"""
-                                                    NinoTypeMetadata.RegisterSerializer<{{baseTypeName}}>({{method}}, {{baseType.Parents.Any().ToString().ToLower()}});
+                                                    NinoTypeMetadata.RegisterSerializer<{{baseTypeName}}>({{method}}, {{(baseType.ParentTypeIds.Length > 0).ToString().ToLower()}});
                                         """);
                     }
                 }
 
                 prefix = !string.IsNullOrEmpty(ninoType.CustomSerializer) ? $"{ninoType.CustomSerializer}." : "";
 
-                if (registeredTypes.Add(type))
+                if (registeredTypeIds.Add(typeId))
                 {
-                    var method = ninoType.TypeSymbol.IsInstanceType() ? $"{prefix}SerializeImpl" : "null";
+                    var method = TypeInfoDtoExtensions.IsInstanceType(ninoType.TypeInfo) ? $"{prefix}SerializeImpl" : "null";
                     sb.AppendLine($$"""
-                                                NinoTypeMetadata.RegisterSerializer<{{typeFullName}}>({{method}}, {{ninoType.Parents.Any().ToString().ToLower()}});
+                                                NinoTypeMetadata.RegisterSerializer<{{typeFullName}}>({{method}}, {{(ninoType.ParentTypeIds.Length > 0).ToString().ToLower()}});
                                     """);
                 }
 
-                var meth = ninoType.TypeSymbol.IsInstanceType() ? $"{prefix}SerializeImpl" : "null";
+                var meth = TypeInfoDtoExtensions.IsInstanceType(ninoType.TypeInfo) ? $"{prefix}SerializeImpl" : "null";
                 foreach (var baseType in baseTypes)
                 {
-                    var baseTypeName = baseType.TypeSymbol.GetDisplayString();
+                    var baseTypeName = baseType.TypeInfo.DisplayName;
                     sb.AppendLine($$"""
                                                 NinoTypeMetadata.RecordSubTypeSerializer<{{baseTypeName}}, {{typeFullName}}>({{meth}});
                                     """);
@@ -89,7 +98,7 @@ public partial class SerializerGenerator(
                 continue;
             }
 
-            if (registeredTypes.Add(type))
+            if (registeredTypeIds.Add(typeId))
                 sb.AppendLine($$"""
                                             NinoTypeMetadata.RegisterSerializer<{{typeFullName}}>(Serialize, false);
                                 """);
@@ -101,19 +110,20 @@ public partial class SerializerGenerator(
 
     protected override void Generate(SourceProductionContext spc)
     {
-        var compilation = Compilation;
-        HashSet<ITypeSymbol> registeredTypes = new(SymbolEqualityComparer.Default);
+        HashSet<int> registeredTypeIds = new();
 
         // Reduced from 32MB to 256KB to avoid LOH allocation and memory fragmentation
         // StringBuilder will automatically grow as needed
         StringBuilder sb = new(262_144); // 256KB
-        HashSet<ITypeSymbol> trivialTypes = new(SymbolEqualityComparer.Default);
-        GenerateTrivialCode(spc, trivialTypes);
-        // add string type
-        trivialTypes.Add(compilation.GetSpecialType(SpecialType.System_String));
-        GenerateGenericRegister(sb, "Trivial", trivialTypes, registeredTypes);
+        HashSet<int> trivialTypeIds = new();
+        GenerateTrivialCode(spc, trivialTypeIds);
+        // add string type (find in cache)
+        var stringTypeId = TypeInfoCache.FirstOrDefault(kvp => kvp.Value.SpecialType == SpecialTypeDto.System_String).Key;
+        if (stringTypeId != 0)
+            trivialTypeIds.Add(stringTypeId);
+        GenerateGenericRegister(sb, "Trivial", trivialTypeIds, registeredTypeIds);
 
-        var curNamespace = compilation.AssemblyName!.GetNamespace();
+        var curNamespace = AssemblyNamespace;
 
         // Unity initialization code (conditional)
         var unityInitCode = IsUnityAssembly ? """

@@ -1,10 +1,16 @@
+using System.Collections.Generic;
 using Microsoft.CodeAnalysis;
+using Nino.Generator.Metadata;
 
 namespace Nino.Generator.Template;
 
-public abstract class NinoGenerator(Compilation compilation, bool isUnityAssembly = false)
+public abstract class NinoGenerator(
+    Dictionary<int, TypeInfoDto> typeInfoCache,
+    string assemblyNamespace,
+    bool isUnityAssembly = false)
 {
-    protected readonly Compilation Compilation = compilation;
+    protected readonly Dictionary<int, TypeInfoDto> TypeInfoCache = typeInfoCache;
+    protected readonly string AssemblyNamespace = assemblyNamespace;
     protected readonly bool IsUnityAssembly = isUnityAssembly;
 
     protected abstract void Generate(SourceProductionContext spc);
