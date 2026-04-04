@@ -29,7 +29,7 @@ public class CSharpParser(HashSet<ITypeSymbol> ninoSymbols) : NinoTypeParser
 
                 if (!isNinoType) continue;
             }
-            
+
             // inaccessible types
             if (ninoSymbol.DeclaredAccessibility != Accessibility.Public)
             {
@@ -99,6 +99,21 @@ public class CSharpParser(HashSet<ITypeSymbol> ninoSymbols) : NinoTypeParser
 
                 void AddMembers(NinoType type)
                 {
+                    // FIX: Collect parent members FIRST (depth-first, root-to-leaf order).
+                    // Previously this added the current type's entry before recursing into parents,
+                    // which produced [child, parent, grandparent] order.  That meant:
+                    //   1. In an inheritance chain (A : B) the child's own fields were serialized
+                    //      before the base-class fields, so any new field appended to the child
+                    //      class would shift the base-class fields and break deserialization.
+                    //   2. When a type contains multiple NinoType members (B then C), the members
+                    //      of B were interleaved with the outer type's own fields in an unexpected
+                    //      way, making it impossible to safely append fields to B.
+                    // The correct order is [grandparent, parent, child] – i.e. base types first.
+                    foreach (var parent in type.Parents)
+                    {
+                        AddMembers(parent);
+                    }
+
                     var entry = (new HashSet<ISymbol>(SymbolEqualityComparer.Default), new List<IParameterSymbol>());
                     hierarchicalMembers.Add(entry);
                     var (members, primaryConstructorParams) = entry;
@@ -154,7 +169,7 @@ public class CSharpParser(HashSet<ITypeSymbol> ninoSymbols) : NinoTypeParser
                                         p.Name.Equals(parameter.Name, StringComparison.OrdinalIgnoreCase)
                                         && !p.IsStatic);
 
-                                // If any parameter does not have a matching readonly property, it’s likely not a primary constructor
+                                // If any parameter does not have a matching readonly property, it's likely not a primary constructor
                                 if (matchingProperty == null || !matchingProperty.IsReadOnly)
                                 {
                                     break;
@@ -165,12 +180,6 @@ public class CSharpParser(HashSet<ITypeSymbol> ninoSymbols) : NinoTypeParser
                             members.UnionWith(primaryConstructorParams);
                             break;
                         }
-                    }
-
-                    // Parent members
-                    foreach (var parent in type.Parents)
-                    {
-                        AddMembers(parent);
                     }
                 }
 
